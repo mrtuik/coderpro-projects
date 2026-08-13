@@ -1,0 +1,3316 @@
+<!DOCTYPE html>
+<html lang="en" class="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>BazaarKart - Quick Commerce Grocery in Minutes (v1.9)</title>  <!-- 
+    <!-- 
+    
+     
+    
+    
+    
+    
+    
+    
+
+  <!-- PWA & Mobile Meta Tags -->
+  <meta name="theme-color" content="#16a34a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f0fdf4',
+              100: '#dcfce7',
+              200: '#bbf7d0',
+              500: '#22c55e',
+              600: '#16a34a',
+              700: '#15803d',
+              800: '#166534',
+              900: '#14532d',
+            },
+            accent: {
+              50: '#fffbeb',
+              400: '#facc15',
+              500: '#eab308',
+            }
+          },
+          fontFamily: {
+            sans: ['"Plus Jakarta Sans"', 'sans-serif'],
+          }
+        }
+      }
+    }
+  </script>
+  
+  <!-- Google Fonts: Plus Jakarta Sans -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <!-- Lucide Icons CDN -->
+  <script src='https://cdn.jsdelivr.net/npm/lucide@latest/dist/umd/lucide.min.js'></script>
+
+  <!-- Leaflet Maps CSS & JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Canvas Confetti CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+
+  <style>
+    * {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+
+    body {
+      background-color: #f1f5f9;
+    }
+    
+    .custom-scrollbar::-webkit-scrollbar {
+      display: none;
+    }
+    .custom-scrollbar {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+
+    /* Spring & Micro Animations */
+    .slide-up {
+      animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+    @keyframes slideUp {
+      from { transform: translateY(100%); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+
+    .fade-in {
+      animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .bounce-subtle {
+      animation: bounceSubtle 2s infinite;
+    }
+    @keyframes bounceSubtle {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-4px); }
+    }
+
+    .nav-pop {
+      animation: navPop 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+    @keyframes navPop {
+      0% { transform: scale(0.85); }
+      100% { transform: scale(1); }
+    }
+
+    /* Marker Bounce Animation */
+    .marker-bounce {
+      animation: markerBounce 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+    @keyframes markerBounce {
+      0% { transform: translateY(-24px) scale(0.8); opacity: 0; }
+      100% { transform: translateY(0) scale(1); opacity: 1; }
+    }
+
+    .glass-nav {
+      background: rgba(255, 255, 255, 0.95);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+    }
+
+    .pulse-glow {
+      animation: pulseGlow 2s infinite;
+    }
+    @keyframes pulseGlow {
+      0%, 100% { box-shadow: 0 0 15px rgba(22, 163, 74, 0.25); }
+      50% { box-shadow: 0 0 25px rgba(22, 163, 74, 0.5); }
+    }
+
+    .leaflet-container {
+      width: 100%;
+      height: 100%;
+      border-radius: 1rem;
+      z-index: 10;
+    }
+
+    .custom-leaflet-pin {
+      background: transparent;
+      border: none;
+    }
+
+    /* Scoped Leaflet Attribution Styling (Module E) */
+    .leaflet-control-attribution {
+      font-size: 8px !important;
+      opacity: 0.65;
+      background: rgba(255, 255, 255, 0.75) !important;
+      border-radius: 6px;
+      padding: 1px 5px !important;
+      margin: 4px !important;
+    }
+  </style>
+</head>
+<body class='text-slate-800 min-h-screen flex flex-col justify-start sm:justify-center items-center antialiased'>
+
+  <!-- Main Mobile Quick-Commerce App Container -->
+  <div id="app-container" class="w-full max-w-md h-[100dvh] bg-slate-50 flex flex-col relative overflow-hidden shadow-2xl sm:rounded-3xl border border-slate-200/80">
+    
+    <!-- Top Sticky Quick-Commerce Header -->
+    <header id="main-header" class="hidden glass-nav sticky top-0 z-30 px-4 py-2.5 border-b border-slate-200/80 flex items-center justify-between shadow-xs">
+      <button onclick="app.navigateTo('location-selector')" class="flex items-center space-x-2 text-left max-w-[72%] group active:scale-95 transition-transform">
+        <div class="w-8 h-8 rounded-xl bg-brand-50 text-brand-600 flex items-center justify-center flex-shrink-0 border border-brand-200/60 shadow-xs">
+          <i data-lucide="map-pin" class="w-4 h-4 text-brand-600"></i>
+        </div>
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center space-x-1">
+            <span class="font-black text-[9px] text-slate-900 uppercase tracking-wider">DELIVERING TO</span>
+            <span id="address-type-tag" class="px-1.5 py-0.2 bg-brand-100 text-brand-800 text-[8px] font-black rounded-md uppercase">LOCATION</span>
+            <i data-lucide="chevron-down" class="w-3 h-3 text-slate-500 flex-shrink-0"></i>
+          </div>
+          <p id="header-address-text" class="text-xs text-slate-600 font-bold truncate max-w-[180px] sm:max-w-[220px]">Select delivery location</p>
+        </div>
+      </button>
+
+      <div class="flex items-center space-x-2">
+        <button onclick="app.navigateTo('notifications')" class="p-2 rounded-xl bg-slate-100/80 text-slate-700 hover:bg-slate-200 relative active:scale-90 transition">
+          <i data-lucide="bell" class="w-4 h-4"></i>
+          <span id="notif-badge" class="hidden absolute top-1 right-1 w-2 h-2 bg-rose-500 rounded-full ring-2 ring-white"></span>
+        </button>
+        <button onclick="app.navigateTo('profile')" class="w-8 h-8 rounded-xl bg-brand-600 text-white font-black text-xs flex items-center justify-center shadow-md shadow-brand-600/20 active:scale-90 transition border border-brand-500 ring-2 ring-brand-100">
+          <span id="header-user-avatar">U</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content Dynamic Scroll Region -->
+    <main id="app-content" data-current-view="splash" class="flex-1 overflow-y-auto custom-scrollbar relative p-3 pb-28">
+      <!-- Default Splash View -->      <div id='splash-view' class='flex flex-col items-center justify-center h-full space-y-6 fade-in'>
+        <div class='w-24 h-24 bg-brand-600 rounded-3xl flex items-center justify-center text-white shadow-2xl shadow-brand-600/40 pulse-glow'>
+          <svg class='w-12 h-12 text-white' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'><polygon points='13 2 3 14 12 14 11 22 21 10 12 10 13 2'></polygon></svg>
+        </div>
+        <div class="text-center">
+          <h1 class="text-3xl font-black text-slate-900 tracking-tight">BazaarKart</h1>
+          <p class="text-xs text-brand-700 font-extrabold tracking-wide uppercase mt-1">Groceries delivered in 30 minutes</p>
+        </div>
+        <div class="pt-6">
+          <div class="animate-spin rounded-full h-8 w-8 border-3 border-brand-600 border-t-transparent"></div>
+        </div>
+      </div>
+    </main>
+
+    <!-- On-Launch Location Permission Banner (Module D - Non-Blocking) -->
+    <div id="location-banner" class="hidden fixed inset-x-3 max-w-md mx-auto z-40 transition-all duration-300 transform translate-y-0" style="bottom: 75px;">
+      <div class="bg-slate-900 text-white p-3 px-3.5 rounded-2xl shadow-2xl border border-slate-700/80 flex items-center justify-between">
+        <div class="flex items-center space-x-2.5 min-w-0 flex-1 pr-2">
+          <div class="w-8 h-8 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center justify-center flex-shrink-0">
+            <i data-lucide="map-pin-off" class="w-4 h-4"></i>
+          </div>
+          <div class="min-w-0 flex-1">
+            <h4 class="text-xs font-black text-white leading-tight">Location Permission Off</h4>
+            <p class="text-[9.5px] text-slate-300 font-medium truncate">Enable GPS to discover nearby partner stores</p>
+          </div>
+        </div>
+        <div class="flex items-center space-x-1.5 flex-shrink-0">
+          <button onclick="app.detectCurrentGPS()" class="bg-brand-600 hover:bg-brand-700 text-white font-black text-[10px] px-2.5 py-1.5 rounded-xl shadow-xs uppercase active:scale-95 transition">
+            GRANT
+          </button>
+          <button onclick="app.dismissLocationBanner()" class="p-1 rounded-lg text-slate-400 hover:text-white active:scale-90 transition">
+            <i data-lucide="x" class="w-4 h-4"></i>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Floating Cart Bar -->
+    <div id="floating-cart-bar" class="hidden fixed inset-x-3 max-w-md mx-auto z-40 transition-all duration-300 transform translate-y-0" style="bottom: 80px;">
+      <div onclick="app.navigateTo('cart')" class="bg-brand-700 text-white p-2.5 px-3.5 rounded-2xl shadow-2xl flex items-center justify-between cursor-pointer border border-brand-500/30 active:scale-98 transition group">
+        <div class="flex items-center space-x-3">
+          <div class="w-9 h-9 rounded-xl bg-white/20 backdrop-blur flex items-center justify-center font-black text-xs">
+            <span id="floating-cart-count">0</span>
+          </div>
+          <div>
+            <span id="floating-cart-total" class="text-xs font-black block leading-none">₹0.00</span>
+            <span class="text-[9px] text-brand-200 font-extrabold uppercase tracking-wider block mt-0.5">Total Amount • Instant Checkout</span>
+          </div>
+        </div>
+        <div class="flex items-center space-x-1 font-black text-[11px] bg-white text-brand-800 px-3 py-1.5 rounded-xl shadow-xs group-hover:bg-brand-50 transition">
+          <span>VIEW CART</span>
+          <i data-lucide="arrow-right" class="w-3.5 h-3.5"></i>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom Navigation Bar -->
+    <nav id="bottom-nav" class="hidden fixed bottom-3 inset-x-3 max-w-md mx-auto rounded-3xl shadow-xl shadow-slate-900/10 border border-slate-200/80 bg-white/95 backdrop-blur-md px-2 py-2 flex justify-around items-center z-30">
+      <button onclick="app.navigateTo('home')" data-nav="home" class="nav-item flex flex-col items-center py-1 px-3 text-slate-400 font-bold transition-all duration-200 active:scale-90">
+        <div class="nav-icon-wrapper relative w-10 h-10 flex items-center justify-center rounded-full transition-all duration-300">
+          <i data-lucide="zap" class="w-5 h-5"></i>
+        </div>
+        <span class="text-[10px] mt-0.5">Explore</span>
+      </button>
+      <button onclick="app.navigateTo('categories')" data-nav="categories" class="nav-item flex flex-col items-center py-1 px-3 text-slate-400 font-bold transition-all duration-200 active:scale-90">
+        <div class="nav-icon-wrapper relative w-10 h-10 flex items-center justify-center rounded-full transition-all duration-300">
+          <i data-lucide="layout-grid" class="w-5 h-5"></i>
+        </div>
+        <span class="text-[10px] mt-0.5">Shops & Menu</span>
+      </button>
+      <button onclick="app.navigateTo('orders')" data-nav="orders" class="nav-item flex flex-col items-center py-1 px-3 text-slate-400 font-bold transition-all duration-200 active:scale-90">
+        <div class="nav-icon-wrapper relative w-10 h-10 flex items-center justify-center rounded-full transition-all duration-300">
+          <i data-lucide="shopping-bag" class="w-5 h-5"></i>
+        </div>
+        <span class="text-[10px] mt-0.5">Orders</span>
+      </button>
+      <button onclick="app.navigateTo('wishlist')" data-nav="wishlist" class="nav-item flex flex-col items-center py-1 px-3 text-slate-400 font-bold transition-all duration-200 active:scale-90">
+        <div class="nav-icon-wrapper relative w-10 h-10 flex items-center justify-center rounded-full transition-all duration-300">
+          <i data-lucide="heart" class="w-5 h-5"></i>
+        </div>
+        <span class="text-[10px] mt-0.5">Wishlist</span>
+      </button>
+      <button onclick="app.navigateTo('profile')" data-nav="profile" class="nav-item flex flex-col items-center py-1 px-3 text-slate-400 font-bold transition-all duration-200 active:scale-90">
+        <div class="nav-icon-wrapper relative w-10 h-10 flex items-center justify-center rounded-full transition-all duration-300">
+          <i data-lucide="user" class="w-5 h-5"></i>
+        </div>
+        <span class="text-[10px] mt-0.5">Profile</span>
+      </button>
+    </nav>
+
+    <!-- Global Dynamic Bottom Sheet Container -->
+    <div id="bottom-sheet-backdrop" class="hidden fixed inset-0 bg-slate-950/60 backdrop-blur-sm z-50 transition-opacity">
+      <div id="bottom-sheet" class="fixed inset-x-0 bottom-0 max-w-md mx-auto bg-white rounded-t-3xl p-5 z-50 max-h-[85vh] overflow-y-auto custom-scrollbar slide-up shadow-2xl border-t border-slate-100">
+        <div class="w-12 h-1.5 bg-slate-200 rounded-full mx-auto mb-4"></div>
+        <div id="bottom-sheet-content"></div>
+      </div>
+    </div>
+
+    <!-- Toast Notifications Container -->
+    <div id="toast-container" class="fixed top-4 inset-x-0 max-w-md mx-auto px-4 z-50 pointer-events-none space-y-2"></div>
+
+  </div>
+
+  <!-- Modular Firebase JS Scripts -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+    import { 
+      getDatabase, ref, push, set, update, get, remove, query, orderByChild, equalTo, onValue, off 
+    } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";    import { 
+      getAuth, sendSignInLinkToEmail, isSignInWithEmailLink, signInWithEmailLink, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut 
+    } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js';
+
+    // FIREBASE CONSOLE SETUP INSTRUCTIONS FOR EMAIL LINK AUTH:
+    // 1. Firebase Console --> Authentication --> Sign-in method --> Email/Password --> Enable 'Email link (passwordless sign-in)'.
+    // 2. Confirm deployed domain is added under Authorized Domains.
+    // 3. No SMS provider, no Blaze plan, and no per-message billing required.
+
+    // Firebase Realtime Database Configuration
+    const firebaseConfig = {
+      apiKey: "AIzaSyAZnlTKHHlJIvuPjyoIKHcImtYOCJFtdXA",
+      authDomain: "nsvs-3e969.firebaseapp.com",
+      databaseURL: "https://nsvs-3e969-default-rtdb.firebaseio.com",
+      projectId: "nsvs-3e969",
+      storageBucket: "nsvs-3e969.firebasestorage.app",
+      messagingSenderId: "1050106502182",
+      appId: "1:1050106502182:web:0aa5f357d4c638873b9ae7",
+      measurementId: "G-H8Z0GRC4EK"
+    };
+
+    // Initialize Firebase Services
+    const firebaseApp = initializeApp(firebaseConfig);
+    const db = getDatabase(firebaseApp);
+    const auth = getAuth(firebaseApp);
+
+    // Global Reactive App State
+    const state = {
+      user: null,
+      savedAddresses: [],
+      selectedAddress: null, // Module C: Initialized to null (no hardcoded location)
+      locationBannerDismissed: false, // Module D: Permission banner dismiss tracker
+      isSearchFocused: false, // Module F: Search focus mode tracker
+      nearbyShops: [],
+      selectedShop: null,
+      categories: ['All', 'Vegetables', 'Fruits', 'Dairy', 'Snacks', 'Bakery', 'Beverages'],
+      products: [],
+      cart: [],
+      wishlist: [],
+      orders: [],
+      notifications: [],
+      chats: [],
+      activeChatRoomId: null,
+      currentView: 'splash',
+      activeProductId: null,
+      selectedAddrLabel: 'HOME',
+      activeListeners: {},
+      searchQuery: '',
+      activeCategory: 'All',
+      mapInstance: null,
+      trackingMapInstance: null,
+      deliveryMarker: null,
+      confirmDeleteAddressId: null,
+      addressFilterQuery: '',
+      // Transient State & Timers
+      _searchDebounce: null,
+      _addressFilterDebounce: null,
+      _locationSearchDebounce: null,
+      _pinGeocodeDebounce: null,
+      _searchRequestId: 0,
+      locationSearchResults: [],
+      locationSearchQuery: '',
+      pendingPinLocation: null,
+      pendingAddressPrefill: null,
+      magicLinkSent: false,
+      magicLinkEmail: '',
+      resendCooldown: 0,
+      confirmEmailRequired: false,
+      pinConfirmMapInstance: null,
+      pinConfirmAddressText: '',
+      pinConfirmLocationData: null,
+      mapHasMoved: false,
+      myShopApplication: null,
+      partnerForm: {
+        shopName: '',
+        ownerName: '',
+        phone: '',
+        category: 'Grocery',
+        fullAddress: '',
+        lat: null,
+        lng: null,
+        description: ''
+      }
+    };
+
+    // CartoDB Voyager Tile Layer Constant (Module E - Free & Rich Labels)
+    const CARTO_TILE_URL = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
+    const CARTO_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>';
+
+    // Utility Functions
+    const utils = {
+      formatCurrency: (amount) => `₹${parseFloat(amount || 0).toFixed(2)}`,
+      formatDate: (timestamp) => {
+        if (!timestamp) return '';
+        const d = new Date(timestamp);
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' | ' + d.toLocaleDateString();
+      },
+      escapeHTML: (str) => {
+        if (!str) return '';
+        return String(str).replace(/[&<>"']/g, (m) => ({
+          '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        })[m]);
+      },
+      calculateDiscountPercent: (price, mrp) => {
+        if (!mrp || mrp <= price) return null;
+        return Math.round(((mrp - price) / mrp) * 100);
+      },
+      getDistanceKm: (lat1, lon1, lat2, lon2) => {
+        if (!lat1 || !lon1 || !lat2 || !lon2) return 1.2;
+        const R = 6371;
+        const dLat = (lat2 - lat1) * Math.PI / 180;
+        const dLon = (lon2 - lon1) * Math.PI / 180;
+        const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+          Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+          Math.sin(dLon/2) * Math.sin(dLon/2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        return R * c;
+      },
+      hydrateIcons: () => {
+        if (window.lucide && typeof window.lucide.createIcons === 'function') {
+          try { window.lucide.createIcons(); } catch(e) {}
+        }
+      },
+      toast: (msg, type = 'info') => {
+        const container = document.getElementById('toast-container');
+        const toast = document.createElement('div');
+        const bgColors = {
+          success: 'bg-emerald-600 text-white',
+          error: 'bg-rose-600 text-white',
+          warning: 'bg-amber-500 text-slate-950 font-bold',
+          info: 'bg-slate-900 text-white'
+        };
+        toast.className = `p-3.5 rounded-2xl shadow-xl text-xs font-bold flex items-center justify-between transition-all duration-300 pointer-events-auto fade-in ${bgColors[type] || bgColors.info}`;
+        toast.innerHTML = `<span>${utils.escapeHTML(msg)}</span>`;
+        container.appendChild(toast);
+        setTimeout(() => {
+          toast.classList.add('opacity-0');
+          setTimeout(() => toast.remove(), 300);
+        }, 3000);
+      }
+    };
+
+    // Customer App Class
+    class BazaarKartCustomerApp {
+      constructor() {
+        this.initApp();
+      }
+
+      async initApp() {
+        if (isSignInWithEmailLink(auth, window.location.href)) {
+          await this.completeMagicLinkSignIn();
+          return;
+        }
+
+        onAuthStateChanged(auth, async (user) => {
+          if (user) {
+            state.user = {
+              uid: user.uid,
+              name: user.displayName || "Customer",
+              phone: user.phoneNumber || "",
+              email: user.email || "",
+              photoURL: user.photoURL || null
+            };
+            await this.checkUserProfileAndLoad();
+          } else {
+            const savedUid = localStorage.getItem('bk_customer_uid');
+            if (savedUid) {
+              state.user = {
+                uid: savedUid,
+                name: localStorage.getItem('bk_customer_name') || "Valued Customer",
+                phone: localStorage.getItem('bk_customer_phone') || ""
+              };
+              await this.checkUserProfileAndLoad();
+            } else {
+              this.navigateTo('auth');
+            }
+          }
+        });
+      }
+
+      async checkUserProfileAndLoad() {
+        if (!state.user) return;
+        
+        try {
+          const userSnap = await get(ref(db, `users/${state.user.uid}`));
+          if (userSnap.exists()) {
+            const val = userSnap.val();
+            state.user.name = val.name || state.user.name;
+            state.user.phone = val.phone || state.user.phone;
+          }
+        } catch(e) {}
+
+        localStorage.setItem('bk_customer_uid', state.user.uid);
+        localStorage.setItem('bk_customer_name', state.user.name);
+
+        if (!state.user.name || state.user.name === 'Customer' || state.user.name === 'Valued Customer') {
+          this.navigateTo('complete-profile');
+          return;
+        }
+
+        this.loadUserDataFromStorage();
+        this.setupAddressListener();
+        await this.loadNearbyShops();
+      }
+
+      async syncUserProfile() {
+        if (!state.user) return;
+        const userRef = ref(db, `users/${state.user.uid}`);
+        await update(userRef, {
+          name: state.user.name,
+          phone: state.user.phone || '',
+          email: state.user.email || '',
+          lastLogin: Date.now()
+        });
+        localStorage.setItem('bk_customer_uid', state.user.uid);
+        localStorage.setItem('bk_customer_name', state.user.name);
+      }
+
+      loadUserDataFromStorage() {
+        if (!state.user) return;
+        const cartKey = `bk_cart_${state.user.uid}`;
+        const wishKey = `bk_wishlist_${state.user.uid}`;
+        try { state.cart = JSON.parse(localStorage.getItem(cartKey)) || []; } catch(e) { state.cart = []; }
+        try { state.wishlist = JSON.parse(localStorage.getItem(wishKey)) || []; } catch(e) { state.wishlist = []; }
+      }
+
+      clearListeners() {
+        Object.keys(state.activeListeners).forEach(key => {
+          if (state.activeListeners[key]) {
+            try { off(state.activeListeners[key]); } catch(e) {}
+          }
+        });
+        state.activeListeners = {};
+      }
+
+      setupAddressListener() {
+        if (!state.user) return;
+        const key = 'addresses';
+        if (state.activeListeners[key]) {
+          try { off(state.activeListeners[key]); } catch(e) {}
+        }
+
+        const addrRef = query(ref(db, 'addresses'), orderByChild('userId'), equalTo(state.user.uid));
+        state.activeListeners[key] = addrRef;
+
+        onValue(addrRef, (snap) => {
+          const raw = snap.val() || {};
+          const list = Object.keys(raw).map(id => {
+            const item = raw[id];
+            return {
+              id,
+              type: (item.label || 'HOME').toUpperCase(),
+              address: item.fullAddress || '',
+              landmark: item.landmark || '',
+              pincode: item.pincode || '',
+              lat: item.lat || 28.6139,
+              lng: item.lng || 77.2090,
+              isDefault: !!item.isDefault,
+              isSelected: state.selectedAddress ? state.selectedAddress.id === id : !!item.isDefault
+            };
+          });
+
+          state.savedAddresses = list;
+
+          if (list.length > 0 && !state.selectedAddress) {
+            const currentSelected = list.find(a => a.isSelected) || list.find(a => a.isDefault) || list[0];
+            state.selectedAddress = currentSelected;
+            state.locationBannerDismissed = true;
+          }
+
+          this.updateHeaderUI();
+          if (state.currentView === 'location-selector') this.renderLocationSelector(true);
+          if (state.currentView === 'profile') this.renderProfile(true);
+        }, (err) => {
+          utils.toast("Addresses sync issue — showing local data", "warning");
+        });
+      }
+
+      async loadNearbyShops() {
+        try {
+          const shopSnap = await get(ref(db, 'shops'));
+          let allShops = [];
+          
+          if (shopSnap.exists()) {
+            const raw = shopSnap.val();
+            allShops = Object.keys(raw).map(id => ({ id, ...raw[id] }));
+          } else {
+            const newShopRef = push(ref(db, 'shops'));
+            const shopId = newShopRef.key;
+            const demoShop = {
+              shopName: "BazaarKart Fresh Express",
+              ownerName: "Partner Merchant",
+              phone: "9876543210",
+              latitude: state.selectedAddress ? state.selectedAddress.lat : 28.6139,
+              longitude: state.selectedAddress ? state.selectedAddress.lng : 77.2090,
+              deliveryRadius: 10,
+              status: "open",
+              rating: 4.9,
+              deliveryTimeMins: "30-40 Mins",
+              minOrderValue: 49,
+              createdAt: Date.now()
+            };
+            await set(newShopRef, demoShop);
+            allShops = [{ id: shopId, ...demoShop }];
+
+            await this.seedProductsCatalog(shopId);
+          }
+
+          const curLat = state.selectedAddress ? state.selectedAddress.lat : 28.6139;
+          const curLng = state.selectedAddress ? state.selectedAddress.lng : 77.2090;
+
+          state.nearbyShops = allShops.map(shop => {
+            const dist = utils.getDistanceKm(curLat, curLng, shop.latitude || 28.6139, shop.longitude || 77.2090);
+            return { ...shop, distanceKm: dist, deliveryTimeMins: shop.deliveryTimeMins || "30-40 Mins" };
+          }).filter(s => s.distanceKm <= (s.deliveryRadius || 10) && s.status !== 'closed');
+
+          if (state.nearbyShops.length === 0) {
+            this.navigateTo('no-shops');
+          } else {
+            state.selectedShop = state.nearbyShops[0];
+            this.setupRealtimeDataListeners();
+            if (['splash', 'auth', 'no-shops', 'complete-profile'].includes(state.currentView)) {
+              this.navigateTo('home');
+            }
+          }
+        } catch (err) {
+          utils.toast('Store catalog sync error: ' + err.message, 'error');
+          if (state.currentView === 'splash') this.navigateTo('home');
+        }
+      }
+
+      async seedProductsCatalog(shopId) {
+        const demoProducts = [
+          { name: "Organic Farm Fresh Tomatoes", price: 28, mrp: 40, unit: "500g", stock: 60, isAvailable: true, freshBadge: true, organicBadge: true, category: "Vegetables", image: "https://images.unsplash.com/photo-1592924357228-91a4daadcfea?w=400", description: "Farm picked organic ripe red tomatoes, rich in vitamin C." },
+          { name: "Alphonso Ratnagiri Mangoes", price: 340, mrp: 450, unit: "1 kg", stock: 25, isAvailable: true, freshBadge: true, organicBadge: true, category: "Fruits", image: "https://images.unsplash.com/photo-1553279768-865429fa0078?w=400", description: "Sweet naturally ripened GI tagged Alphonso mangoes." },
+          { name: "Amul Taaza Toned Milk", price: 27, mrp: 28, unit: "500 ml", stock: 120, isAvailable: true, freshBadge: true, organicBadge: false, category: "Dairy", image: "https://images.unsplash.com/photo-1563636619-e9143da7973b?w=400", description: "Pasteurised toned milk with 3% fat." },
+          { name: "Lays Classic Salted Potato Chips", price: 20, mrp: 20, unit: "50g", stock: 90, isAvailable: true, freshBadge: false, organicBadge: false, category: "Snacks", image: "https://images.unsplash.com/photo-1566478989037-eec170784d0b?w=400", description: "Crispy salted potato wafers." },
+          { name: "Freshly Baked Multigrain Bread", price: 45, mrp: 55, unit: "400g", stock: 35, isAvailable: true, freshBadge: true, organicBadge: false, category: "Bakery", image: "https://images.unsplash.com/photo-1509440159596-0249088772ff?w=400", description: "High fiber artisan multigrain bread." },
+          { name: "Fresh Tender Green Coconut Water", price: 49, mrp: 60, unit: "1 PC", stock: 40, isAvailable: true, freshBadge: true, organicBadge: true, category: "Beverages", image: "https://images.unsplash.com/photo-1525385133512-2f3bdd039054?w=400", description: "Naturally hydrating tender coconut." }
+        ];
+
+        for (let p of demoProducts) {
+          const pref = push(ref(db, 'products'));
+          await set(pref, { shopId, ...p, createdAt: Date.now() });
+        }
+      }
+
+      setupRealtimeDataListeners() {
+        this.clearListeners();
+        if (!state.selectedShop) return;
+
+        this.setupAddressListener();
+
+        const prodRef = ref(db, 'products');
+        state.activeListeners['products'] = prodRef;
+        onValue(prodRef, (snap) => {
+          const raw = snap.val() || {};
+          const list = [];
+          for (let id in raw) {
+            if (raw[id].shopId === state.selectedShop.id && raw[id].isAvailable !== false) {
+              list.push({ id, ...raw[id] });
+            }
+          }
+          state.products = list;
+          if (state.currentView === 'home') this.renderHome(true);
+          if (state.currentView === 'shop-profile') this.renderShopProfile(state.selectedShop.id, true);
+          if (state.currentView === 'product-details' && state.activeProductId) this.renderProductDetails(state.activeProductId, true);
+        });
+
+        if (state.user) {
+          const ordersRef = ref(db, 'orders');
+          state.activeListeners['orders'] = ordersRef;
+          onValue(ordersRef, (snap) => {
+            const raw = snap.val() || {};
+            const list = [];
+            for (let id in raw) {
+              if (raw[id].customerId === state.user.uid) {
+                list.push({ id, ...raw[id] });
+              }
+            }
+            state.orders = list.sort((a,b) => (b.createdAt || 0) - (a.createdAt || 0));
+            if (state.currentView === 'orders') this.renderOrders(true);
+          });
+        }
+      }
+
+      updateFloatingCartBar() {
+        const bar = document.getElementById('floating-cart-bar');
+        const countEl = document.getElementById('floating-cart-count');
+        const totalEl = document.getElementById('floating-cart-total');
+        const bottomNav = document.getElementById('bottom-nav');
+
+        const totalQty = state.cart.reduce((sum, item) => sum + item.quantity, 0);
+        const totalPrice = state.cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+
+        if (totalQty > 0 && !['cart', 'checkout', 'location-search', 'location-pin-confirm', 'shop-partner-apply'].includes(state.currentView)) {
+          countEl.textContent = totalQty;
+          totalEl.textContent = utils.formatCurrency(totalPrice);
+          bar.classList.remove('hidden');
+
+          if (bottomNav && !bottomNav.classList.contains('hidden')) {
+            const navHeight = bottomNav.offsetHeight || 60;
+            bar.style.bottom = `${navHeight + 20}px`;
+          } else {
+            bar.style.bottom = '16px';
+          }
+        } else {
+          bar.classList.add('hidden');
+        }
+
+        if (state.user) {
+          localStorage.setItem(`bk_cart_${state.user.uid}`, JSON.stringify(state.cart));
+        }
+
+        this.updateLocationBanner();
+      }
+
+      // Module D: Non-blocking On-Launch Location Banner Renderer
+      updateLocationBanner() {
+        const banner = document.getElementById('location-banner');
+        if (!banner) return;
+
+        const mainViews = ['home', 'categories', 'orders', 'wishlist', 'profile'];
+        const isSearchActive = state.currentView === 'home' && (state.isSearchFocused || (state.searchQuery && state.searchQuery.trim().length > 0));
+
+        const shouldShow = (state.selectedAddress === null) && 
+                           (!state.locationBannerDismissed) && 
+                           mainViews.includes(state.currentView) && 
+                           !isSearchActive;
+
+        if (shouldShow) {
+          banner.classList.remove('hidden');
+          const cartBar = document.getElementById('floating-cart-bar');
+          const bottomNav = document.getElementById('bottom-nav');
+
+          if (cartBar && !cartBar.classList.contains('hidden')) {
+            banner.style.bottom = '145px';
+          } else if (bottomNav && !bottomNav.classList.contains('hidden')) {
+            banner.style.bottom = '75px';
+          } else {
+            banner.style.bottom = '16px';
+          }
+        } else {
+          banner.classList.add('hidden');
+        }
+      }
+
+      dismissLocationBanner() {
+        state.locationBannerDismissed = true;
+        this.updateLocationBanner();
+      }
+
+      // Module F: Distraction-Free Search Mode Handler
+      updateSearchDistractionFreeMode() {
+        const isSearching = (state.currentView === 'home') && 
+                            (state.isSearchFocused || (state.searchQuery && state.searchQuery.trim().length > 0));
+
+        const nav = document.getElementById('bottom-nav');
+        const cartBar = document.getElementById('floating-cart-bar');
+        const locBanner = document.getElementById('location-banner');
+
+        if (isSearching) {
+          if (nav) nav.classList.add('hidden');
+          if (cartBar) cartBar.classList.add('hidden');
+          if (locBanner) locBanner.classList.add('hidden');
+        } else {
+          if (nav && !['splash', 'auth', 'no-shops', 'location-selector', 'complete-profile', 'add-address', 'edit-profile', 'location-search', 'location-pin-confirm', 'shop-partner-apply'].includes(state.currentView)) {
+            nav.classList.remove('hidden');
+          }
+          this.updateFloatingCartBar();
+          this.updateLocationBanner();
+        }
+      }
+
+      onSearchFocus() {
+        state.isSearchFocused = true;
+        this.updateSearchDistractionFreeMode();
+      }
+
+      onSearchBlur() {
+        state.isSearchFocused = false;
+        setTimeout(() => {
+          this.updateSearchDistractionFreeMode();
+        }, 150);
+      }
+
+      refreshReactiveView() {
+        const reactiveViews = ['home', 'wishlist', 'product-details', 'cart', 'shop-profile', 'categories'];
+        if (reactiveViews.includes(state.currentView)) {
+          if (state.currentView === 'product-details' && state.activeProductId) {
+            this.renderProductDetails(state.activeProductId, true);
+          } else if (state.currentView === 'home') {
+            this.renderHome(true);
+          } else if (state.currentView === 'wishlist') {
+            this.renderWishlist(true);
+          } else if (state.currentView === 'cart') {
+            this.renderCart(true);
+          } else if (state.currentView === 'shop-profile' && state.selectedShop) {
+            this.renderShopProfile(state.selectedShop.id, true);
+          } else if (state.currentView === 'categories') {
+            this.renderCategories(true);
+          }
+        }
+        this.updateFloatingCartBar();
+        utils.hydrateIcons();
+      }
+
+      navigateTo(view, params = {}, isSoftRefresh = false) {
+        state.currentView = view;
+        this.closeBottomSheet();
+
+        const header = document.getElementById('main-header');
+        const nav = document.getElementById('bottom-nav');
+        const content = document.getElementById('app-content');
+
+        if (['splash', 'auth', 'no-shops', 'location-selector', 'complete-profile', 'add-address', 'edit-profile', 'location-search', 'location-pin-confirm', 'shop-partner-apply'].includes(view)) {
+          header.classList.add('hidden');
+          nav.classList.add('hidden');
+        } else {
+          header.classList.remove('hidden');
+          nav.classList.remove('hidden');
+        }
+
+        this.updateHeaderUI();
+        this.updateFloatingCartBar();
+        this.updateSearchDistractionFreeMode();
+
+        document.querySelectorAll('.nav-item').forEach(btn => {
+          const n = btn.getAttribute('data-nav');
+          const wrapper = btn.querySelector('.nav-icon-wrapper');
+          if (n === view) {
+            btn.className = "nav-item flex flex-col items-center py-1 px-3 text-brand-700 font-extrabold transition-all duration-200 active:scale-90";
+            if (wrapper) wrapper.className = "nav-icon-wrapper relative w-10 h-10 flex items-center justify-center rounded-full bg-brand-600 text-white shadow-md shadow-brand-600/30 nav-pop";
+          } else {
+            btn.className = "nav-item flex flex-col items-center py-1 px-3 text-slate-400 hover:text-slate-700 font-bold transition-all duration-200 active:scale-90";
+            if (wrapper) wrapper.className = "nav-icon-wrapper relative w-10 h-10 flex items-center justify-center rounded-full transition-all duration-300";
+          }
+        });
+
+        if (!isSoftRefresh) {
+          content.scrollTop = 0;
+        }
+        utils.hydrateIcons();
+
+        content.setAttribute('data-current-view', view);
+
+        switch (view) {
+          case 'auth': this.renderAuth(isSoftRefresh); break;
+          case 'complete-profile': this.renderCompleteProfile(isSoftRefresh); break;
+          case 'no-shops': this.renderNoShops(isSoftRefresh); break;
+          case 'home': this.renderHome(isSoftRefresh); break;
+          case 'location-selector': this.renderLocationSelector(isSoftRefresh); break;
+          case 'location-search': this.renderLocationSearch(isSoftRefresh); break;
+          case 'location-pin-confirm': this.renderPinConfirm(isSoftRefresh); break;
+          case 'add-address': this.renderAddAddress(params.addressId, isSoftRefresh); break;
+          case 'edit-profile': this.renderEditProfile(isSoftRefresh); break;
+          case 'shop-partner-apply': this.renderShopPartnerForm(isSoftRefresh); break;
+          case 'shop-profile': this.renderShopProfile(params.shopId, isSoftRefresh); break;
+          case 'product-details': this.renderProductDetails(params.productId, isSoftRefresh); break;
+          case 'categories': this.renderCategories(isSoftRefresh); break;
+          case 'cart': this.renderCart(isSoftRefresh); break;
+          case 'checkout': this.renderCheckout(isSoftRefresh); break;
+          case 'order-success': this.renderOrderSuccess(params.orderId, isSoftRefresh); break;
+          case 'orders': this.renderOrders(isSoftRefresh); break;
+          case 'tracking': this.renderOrderTracking(params.orderId, isSoftRefresh); break;
+          case 'chat': this.renderChatRoom(params.chatRoomId, isSoftRefresh); break;
+          case 'wishlist': this.renderWishlist(isSoftRefresh); break;
+          case 'profile': this.renderProfile(isSoftRefresh); break;
+          default: this.renderHome(isSoftRefresh); break;
+        }
+
+        lucide.createIcons();
+      }
+
+      updateHeaderUI() {
+        const addrText = document.getElementById('header-address-text');
+        const tagText = document.getElementById('address-type-tag');
+        const avatarText = document.getElementById('header-user-avatar');
+        const notifBadge = document.getElementById('notif-badge');
+
+        if (addrText) {
+          addrText.textContent = state.selectedAddress ? (state.selectedAddress.address || 'Select delivery location') : 'Select delivery location';
+        }
+        if (tagText) {
+          tagText.textContent = state.selectedAddress ? (state.selectedAddress.type || 'LOCATION') : 'LOCATION';
+        }
+        if (avatarText && state.user) {
+          avatarText.textContent = (state.user.name || 'U')[0].toUpperCase();
+        }
+        if (notifBadge) {
+          const unreadCount = state.notifications ? state.notifications.filter(n => !n.read).length : 0;
+          if (unreadCount > 0) notifBadge.classList.remove('hidden');
+          else notifBadge.classList.add('hidden');
+        }
+
+        this.updateLocationBanner();
+      }
+
+      // -------------------------------------------------------------
+      // VIEW RENDERERS & EVENT HANDLERS
+      // -------------------------------------------------------------
+
+      // 1. AUTHENTICATION (MODULE A: SECURE FIREBASE AUTH - NO FAKE FALLBACKS)
+      renderAuth(isSoft = false) {
+        const container = document.getElementById('app-content');
+        let authBodyHTML = '';
+        if (state.confirmEmailRequired) {
+          authBodyHTML = `<div class='space-y-4'><div><label class='block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-2'>Confirm Email Address</label><p class='text-[11px] text-slate-500 font-medium mb-3'>To complete sign-in on this device, please enter your email address.</p><input type='email' id='auth-confirm-email' placeholder='name@example.com' class='w-full bg-slate-50 border border-slate-200 rounded-2xl py-3.5 px-4 text-xs font-bold text-slate-900 focus:outline-none focus:border-brand-600 transition'></div><button onclick='app.confirmMagicLinkEmail()' id='confirm-email-btn' class='w-full bg-brand-600 hover:bg-brand-700 text-white font-black py-3.5 rounded-2xl shadow-lg shadow-brand-600/25 text-xs tracking-wider transition active:scale-98'>COMPLETE SIGN IN</button><button onclick='app.resetAuthView()' class='w-full text-center text-xs font-bold text-slate-500 hover:text-slate-800 transition py-1'>Cancel & Return</button></div>`;
+        } else if (state.magicLinkSent) {
+          authBodyHTML = `<div class='space-y-4 text-center'><div class='w-12 h-12 bg-emerald-50 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto border border-emerald-200'><i data-lucide='mail-check' class='w-6 h-6'></i></div><div><h3 class='text-sm font-black text-slate-900'>Check Your Email</h3><p class='text-xs text-slate-500 font-medium mt-1 leading-relaxed'>We sent a sign-in link to <span class='font-bold text-slate-800'>${utils.escapeHTML(state.magicLinkEmail)}</span>. Tap the link in your email to sign in instantly.</p></div><div class='pt-2 space-y-2'><button onclick='app.resendMagicLink()' id='resend-link-btn' ${state.resendCooldown > 0 ? 'disabled' : ''} class='w-full bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 font-extrabold py-3 rounded-2xl text-xs transition active:scale-98'>${state.resendCooldown > 0 ? `Resend Link (${state.resendCooldown}s)` : 'Resend Sign-In Link'}</button><button onclick='app.resetAuthView()' class='w-full text-center text-xs font-bold text-brand-600 hover:underline py-1 block'>Use a different email</button></div></div>`;
+        } else {
+          authBodyHTML = `<div><label class='block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-2'>Enter Email Address</label><input type='email' id='auth-email' placeholder='name@example.com' class='w-full bg-slate-50 border border-slate-200 rounded-2xl py-3.5 px-4 text-xs font-bold text-slate-900 focus:outline-none focus:border-brand-600 transition'><button onclick='app.sendMagicLink()' id='send-link-btn' class='mt-4 w-full bg-brand-600 hover:bg-brand-700 text-white font-black py-3.5 rounded-2xl shadow-lg shadow-brand-600/25 text-xs tracking-wider transition active:scale-98 flex items-center justify-center space-x-2'><span>SEND SIGN-IN LINK</span><i data-lucide='mail' class='w-4 h-4'></i></button></div>`;
+        }
+        container.innerHTML = `
+          <div class="flex flex-col justify-center min-h-[88vh] px-2 ${isSoft ? '' : 'fade-in'}">
+            <div class="text-center mb-8 space-y-2">              <div class='w-20 h-20 bg-brand-600 rounded-3xl flex items-center justify-center text-white mx-auto shadow-xl shadow-brand-600/30 pulse-glow'>
+                <svg class='w-10 h-10 text-white' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'><polygon points='13 2 3 14 12 14 11 22 21 10 12 10 13 2'></polygon></svg>
+              </div>
+              <h2 class="text-2xl font-black text-slate-900 tracking-tight">Welcome to BazaarKart</h2>
+              <p class="text-xs text-slate-500 font-semibold">Sign in to unlock 30-minute grocery delivery</p>
+            </div>            <div class='bg-white p-6 rounded-3xl border border-slate-200/80 shadow-xl space-y-5'>
+              ${authBodyHTML} 
+                <div class="flex-grow border-t border-slate-200"></div>
+                <span class="flex-shrink mx-3 text-[10px] text-slate-400 font-extrabold uppercase tracking-widest">OR</span>
+                <div class="flex-grow border-t border-slate-200"></div>
+                            <button onclick='app.signInGoogle()' class='w-full bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-700 font-extrabold py-3.5 px-4 rounded-2xl text-xs flex items-center justify-between transition active:scale-98 relative group'>
+                <div class='flex items-center space-x-3'>
+                <svg class="w-4 h-4" viewBox="0 0 24 24"><path fill="#EA4335" d="M12 5c1.6 0 3 .6 4.1 1.6l3.1-3.1C17.3 1.7 14.8 1 12 1 7.5 1 3.7 3.6 1.9 7.3l3.7 2.9C6.5 7.2 9 5 12 5z"/><path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.7-.2-2.3H12v4.6h6.5c-.3 1.5-1.1 2.8-2.4 3.7l3.7 2.9c2.2-2 3.7-5 3.7-8.9z"/><path fill="#FBBC05" d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.3s.2-1.6.4-2.3L1.9 7.3C.7 9.7 0 12.4 0 15.3s.7 5.6 1.9 8l3.7-2.9c-.2-.7-.4-1.5-.4-2.3z"/><path fill="#34A853" d="M12 23c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2.2-6.4-5.2L1.9 16C3.7 19.7 7.5 22.3 12 23z"/></svg>
+                <span>Continue with Google</span>
+                </div>
+                <span class='px-2 py-0.5 rounded-md bg-brand-100 text-brand-800 text-[8px] font-black uppercase tracking-wider flex-shrink-0'>RECOMMENDED</span>
+              </button>
+            </div>
+            </div>
+          </div>
+        `;
+      }
+
+      async sendMagicLink(emailInput = null) {
+        const email = (emailInput || document.getElementById('auth-email')?.value || '').trim();
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!email || !emailRegex.test(email)) {
+          utils.toast('Please enter a valid email address', 'error');
+          return;
+        }
+
+        const btn = document.getElementById('send-link-btn');
+        if (btn) {
+          btn.disabled = true;
+          btn.innerHTML = `<span>SENDING LINK...</span><div class='animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent ml-2'></div>`;
+        }
+
+        try {
+          const actionCodeSettings = {
+            url: window.location.href.split('?')[0].split('#')[0],
+            handleCodeInApp: true
+          };
+          await sendSignInLinkToEmail(auth, email, actionCodeSettings);
+          localStorage.setItem('bazaarkart_emailForSignIn', email);
+          state.magicLinkEmail = email;
+          state.magicLinkSent = true;
+          state.resendCooldown = 30;
+          this.startResendCooldownTimer();
+          utils.toast('Sign-in link sent to ' + email, 'success');
+          this.renderAuth(true);
+        } catch (err) {
+          console.error('Magic Link Error:', err);
+          utils.toast(err.message || 'Failed to send sign-in link', 'error');
+        } finally {
+          if (btn) btn.disabled = false;
+        }
+      }
+
+      startResendCooldownTimer() {
+        if (state._resendTimer) clearInterval(state._resendTimer);
+        state._resendTimer = setInterval(() => {
+          if (state.resendCooldown > 0) {
+            state.resendCooldown--;
+            const resendBtn = document.getElementById('resend-link-btn');
+            if (resendBtn) {
+              if (state.resendCooldown > 0) {
+                resendBtn.disabled = true;
+                resendBtn.textContent = `Resend Link (${state.resendCooldown}s)`;
+              } else {
+                resendBtn.disabled = false;
+                resendBtn.textContent = 'Resend Sign-In Link';
+              }
+            }
+          } else {
+            clearInterval(state._resendTimer);
+          }
+        }, 1000);
+      }
+
+      async resendMagicLink() {
+        if (state.resendCooldown > 0) return;
+        await this.sendMagicLink(state.magicLinkEmail);
+      }
+
+      resetAuthView() {
+        state.magicLinkSent = false;
+        state.magicLinkEmail = '';
+        state.confirmEmailRequired = false;
+        this.renderAuth(true);
+      }
+
+      async confirmMagicLinkEmail() {
+        const emailInput = document.getElementById('auth-confirm-email');
+        const email = (emailInput?.value || '').trim();
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!email || !emailRegex.test(email)) {
+          utils.toast('Please enter a valid email address', 'error');
+          return;
+        }
+
+        const btn = document.getElementById('confirm-email-btn');
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = 'VERIFYING...';
+        }
+
+        try {
+          const result = await signInWithEmailLink(auth, email, window.location.href);
+          localStorage.removeItem('bazaarkart_emailForSignIn');
+          state.confirmEmailRequired = false;
+          window.history.replaceState({}, document.title, window.location.pathname);
+          utils.toast('Signed in successfully!', 'success');
+          if (result.user) {
+            state.user = {
+              uid: result.user.uid,
+              name: result.user.displayName || '',
+              phone: result.user.phoneNumber || '',
+              email: result.user.email || email
+            };
+            await this.checkUserProfileAndLoad();
+          }
+        } catch (err) {
+          console.error('Magic Link Confirmation Error:', err);
+          utils.toast('Invalid or expired sign-in link. Please request a new one.', 'error');
+        } finally {
+          if (btn) btn.disabled = false;
+        }
+      }
+
+      async completeMagicLinkSignIn() {
+        const email = localStorage.getItem('bazaarkart_emailForSignIn');
+        if (!email) {
+          state.confirmEmailRequired = true;
+          this.navigateTo('auth');
+          return;
+        }
+
+        try {
+          const result = await signInWithEmailLink(auth, email, window.location.href);
+          localStorage.removeItem('bazaarkart_emailForSignIn');
+          window.history.replaceState({}, document.title, window.location.pathname);
+          utils.toast('Signed in successfully!', 'success');
+          if (result.user) {
+            state.user = {
+              uid: result.user.uid,
+              name: result.user.displayName || '',
+              phone: result.user.phoneNumber || '',
+              email: result.user.email || email
+            };
+            await this.checkUserProfileAndLoad();
+          }
+        } catch (err) {
+          console.error('Magic Link Sign-In Error:', err);
+          utils.toast('This link has expired or is invalid — please request a new one', 'error');
+          window.history.replaceState({}, document.title, window.location.pathname);
+          this.navigateTo('auth');
+        }
+      }
+
+
+
+
+
+
+
+
+
+
+      // Module A Fix: Remove fake user fallback on Google Auth error
+      signInGoogle() {
+        const provider = new GoogleAuthProvider();
+        signInWithPopup(auth, provider).then((result) => {
+          state.user = {
+            uid: result.user.uid,
+            name: result.user.displayName || "",
+            email: result.user.email || "",
+            phone: result.user.phoneNumber || ""
+          };
+          this.checkUserProfileAndLoad();
+        }).catch((err) => {
+          console.error("Google Auth Error:", err);
+          let errorMsg = "Google Sign-In failed. Please try again.";
+          if (err && err.code === 'auth/unauthorized-domain') {
+            errorMsg = "Domain unauthorized in Firebase Console. Please add current domain to Authorized Domains.";
+          } else if (err && err.message) {
+            errorMsg = "Google Auth Error: " + err.message;
+          }
+          utils.toast(errorMsg, "error");
+        });
+      }
+
+      // COMPLETE PROFILE SCREEN
+      renderCompleteProfile(isSoft = false) {
+        const container = document.getElementById('app-content');
+        container.innerHTML = `
+          <div class="flex flex-col justify-center min-h-[88vh] px-2 ${isSoft ? '' : 'fade-in'}">
+            <div class="text-center mb-6 space-y-2">
+              <div class="w-16 h-16 bg-brand-50 text-brand-600 rounded-3xl flex items-center justify-center mx-auto border border-brand-200">
+                <i data-lucide="user-plus" class="w-8 h-8"></i>
+              </div>
+              <h2 class="text-xl font-black text-slate-900">Complete Your Profile</h2>
+              <p class="text-xs text-slate-500 font-semibold">Tell us your name and phone number to start ordering</p>
+            </div>
+
+            <form onsubmit="app.saveCompleteProfile(event)" class="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-xl space-y-4">
+              <div>
+                <label class="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1">Full Name</label>
+                <input type="text" id="cp-name" value="${utils.escapeHTML(state.user?.name && state.user.name !== 'Customer' ? state.user.name : '')}" placeholder="e.g. Rahul Sharma" required minlength="2"
+                  class="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 px-4 text-xs font-bold text-slate-900 focus:outline-none focus:border-brand-600">
+                <span id="cp-name-err" class="text-[10px] text-rose-500 font-bold hidden mt-1 block">Name must be at least 2 characters</span>
+              </div>
+
+              <div>
+                <label class="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1">Mobile Number</label>
+                <input type="tel" id="cp-phone" value="${utils.escapeHTML((state.user?.phone || '').replace('+91 ', ''))}" placeholder="9876543210" required maxlength="10"
+                  class="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 px-4 text-xs font-bold text-slate-900 focus:outline-none focus:border-brand-600">
+                <span id="cp-phone-err" class="text-[10px] text-rose-500 font-bold hidden mt-1 block">Enter a valid 10-digit mobile number</span>
+              </div>
+
+              <button type="submit" class="w-full bg-brand-600 hover:bg-brand-700 text-white font-black py-3.5 rounded-2xl shadow-lg shadow-brand-600/25 text-xs tracking-wider transition active:scale-98">
+                SAVE & CONTINUE
+              </button>
+            </form>
+          </div>
+        `;
+      }
+
+      async saveCompleteProfile(e) {
+        e.preventDefault();
+        const nameInput = document.getElementById('cp-name');
+        const phoneInput = document.getElementById('cp-phone');
+        const nameErr = document.getElementById('cp-name-err');
+        const phoneErr = document.getElementById('cp-phone-err');
+
+        const name = nameInput.value.trim();
+        const phoneRaw = phoneInput.value.trim().replace(/\D/g, '');
+
+        let valid = true;
+        if (name.length < 2) {
+          nameErr.classList.remove('hidden');
+          valid = false;
+        } else {
+          nameErr.classList.add('hidden');
+        }
+
+        if (phoneRaw.length !== 10) {
+          phoneErr.classList.remove('hidden');
+          valid = false;
+        } else {
+          phoneErr.classList.add('hidden');
+        }
+
+        if (!valid) return;
+
+        state.user.name = name;
+        state.user.phone = "+91 " + phoneRaw;
+
+        try {
+          await this.syncUserProfile();
+          utils.toast("Profile saved successfully!", "success");
+          this.setupAddressListener();
+          await this.loadNearbyShops();
+        } catch (err) {
+          utils.toast("Failed to update profile: " + err.message, "error");
+        }
+      }
+
+      // EDIT PROFILE VIEW
+      renderEditProfile(isSoft = false) {
+        const container = document.getElementById('app-content');
+        container.innerHTML = `
+          <div class='flex flex-col space-y-3 ${isSoft ? '' : 'fade-in'}'>
+            <div class="flex items-center space-x-2">
+              <button onclick="app.navigateTo('profile')" class="p-2 rounded-xl bg-white border border-slate-200 text-slate-700">
+                <i data-lucide="arrow-left" class="w-4 h-4"></i>
+              </button>
+              <h2 class="text-sm font-black text-slate-900 uppercase tracking-wider">Edit Account Details</h2>
+            </div>
+
+            <form onsubmit="app.saveProfileEdit(event)" class="p-5 bg-white border border-slate-200/80 rounded-3xl space-y-4 shadow-xs">
+              <div>
+                <label class="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1">Full Name</label>
+                <input type="text" id="ep-name" value="${utils.escapeHTML(state.user?.name || '')}" required minlength="2"
+                  class="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 px-4 text-xs font-bold text-slate-900 focus:outline-none focus:border-brand-600">
+              </div>
+
+              <div>
+                <label class="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1">Mobile Phone</label>
+                <input type="tel" id="ep-phone" value="${utils.escapeHTML((state.user?.phone || '').replace('+91 ', ''))}" required maxlength="10"
+                  class="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 px-4 text-xs font-bold text-slate-900 focus:outline-none focus:border-brand-600">
+              </div>
+
+              <button type="submit" class="w-full bg-brand-600 hover:bg-brand-700 text-white font-black py-3.5 rounded-2xl shadow-lg shadow-brand-600/25 text-xs active:scale-98">
+                UPDATE PROFILE
+              </button>
+            </form>
+          </div>
+        `;
+      }
+
+      async saveProfileEdit(e) {
+        e.preventDefault();
+        const name = document.getElementById('ep-name').value.trim();
+        const phoneRaw = document.getElementById('ep-phone').value.trim().replace(/\D/g, '');
+
+        if (name.length < 2 || phoneRaw.length !== 10) {
+          utils.toast("Enter valid name and 10-digit mobile phone", "error");
+          return;
+        }
+
+        state.user.name = name;
+        state.user.phone = "+91 " + phoneRaw;
+
+        try {
+          await this.syncUserProfile();
+          utils.toast("Account updated successfully!", "success");
+          this.navigateTo('profile');
+        } catch (err) {
+          utils.toast("Failed to update profile", "error");
+        }
+      }
+
+      // 2. NO SHOPS SCREEN
+      renderNoShops(isSoft = false) {
+        const container = document.getElementById('app-content');
+        container.innerHTML = `
+          <div class="flex flex-col items-center justify-center min-h-[85vh] px-4 text-center ${isSoft ? '' : 'fade-in'}">
+            <div class="w-24 h-24 bg-rose-50 rounded-full flex items-center justify-center text-rose-500 mb-6 border border-rose-100 shadow-xl">
+              <i data-lucide="store-off" class="w-12 h-12"></i>
+            </div>
+            <h2 class="text-xl font-black text-slate-900 tracking-tight">No Stores Available Nearby</h2>
+            <p class="text-xs text-slate-500 mt-2 max-w-xs leading-relaxed">
+              We couldn't find any BazaarKart partner shops currently delivering to <span class="font-bold text-slate-800">${utils.escapeHTML(state.selectedAddress ? state.selectedAddress.address : 'your selected area')}</span>.
+            </p>
+
+            <button onclick="app.navigateTo('location-selector')" class="mt-6 w-full bg-brand-600 hover:bg-brand-700 text-white font-black py-3.5 rounded-2xl shadow-lg shadow-brand-600/25 text-xs flex items-center justify-center space-x-2">
+              <i data-lucide="map-pin" class="w-4 h-4"></i>
+              <span>Change Delivery Address</span>
+            </button>
+          </div>
+        `;
+      }
+
+      // 3. LOCATION SELECTOR
+      renderLocationSelector(isSoft = false) {
+        const container = document.getElementById('app-content');
+        const filterQ = (state.addressFilterQuery || '').toLowerCase();
+        
+        const filteredAddresses = state.savedAddresses.filter(a => 
+          !filterQ || (a.address || '').toLowerCase().includes(filterQ) || (a.type || '').toLowerCase().includes(filterQ)
+        );
+
+        container.innerHTML = `
+          <div class="space-y-4 ${isSoft ? '' : 'fade-in'}">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center space-x-2">
+                <button onclick="app.navigateTo('home')" class="p-2 rounded-xl bg-white border border-slate-200 text-slate-700">
+                  <i data-lucide="arrow-left" class="w-4 h-4"></i>
+                </button>
+                <h2 class="text-sm font-black text-slate-900 uppercase tracking-wider">Select Delivery Location</h2>
+              </div>
+
+              <button onclick="app.navigateTo('add-address')" class="px-3 py-1.5 rounded-xl bg-brand-600 text-white font-black text-xs flex items-center space-x-1 shadow-xs">
+                <i data-lucide="plus" class="w-3.5 h-3.5"></i>
+                <span>Add New</span>
+              </button>
+            </div>
+
+            <!-- MANUAL LOCATION SEARCH ENTRY POINT -->
+            <button onclick="app.navigateTo('location-search')" class="w-full p-3.5 bg-white border border-slate-200 rounded-2xl flex items-center justify-between shadow-xs active:scale-98 transition group text-left">
+              <div class="flex items-center space-x-3">
+                <div class="w-9 h-9 rounded-xl bg-slate-100 text-slate-600 flex items-center justify-center flex-shrink-0 font-bold">
+                  <i data-lucide="search" class="w-4 h-4 text-slate-500"></i>
+                </div>
+                <div>
+                  <h3 class="text-xs font-black text-slate-900">Enter Location Manually</h3>
+                  <p class="text-[10px] text-slate-500 font-bold">Search building, street, or area name...</p>
+                </div>
+              </div>
+              <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400 group-hover:text-brand-600 transition"></i>
+            </button>
+
+            <!-- Auto GPS Button -->
+            <button onclick="app.detectCurrentGPS()" class="w-full p-4 bg-brand-50 border border-brand-200/80 rounded-2xl flex items-center space-x-3 text-left active:scale-98 transition shadow-xs">
+              <div class="w-10 h-10 rounded-xl bg-brand-600 text-white flex items-center justify-center flex-shrink-0 shadow-md shadow-brand-600/20">
+                <i data-lucide="crosshair" class="w-5 h-5"></i>
+              </div>
+              <div>
+                <h3 class="text-xs font-black text-brand-900">Use Current GPS Location</h3>
+                <p class="text-[10px] text-brand-700 font-bold">Using precise GPS mobile positioning</p>
+              </div>
+            </button>
+
+            ${state.savedAddresses.length > 5 ? `
+              <input type="text" placeholder="Filter saved addresses..." value="${state.addressFilterQuery}" oninput="app.onAddressFilterInput(this.value)"
+                class="w-full bg-white border border-slate-200 rounded-xl py-2 px-3 text-xs font-bold focus:outline-none focus:border-brand-600">
+            ` : ''}
+
+            <!-- Saved Addresses List Container -->
+            <div class="space-y-2">
+              <span class="text-[10px] font-black text-slate-500 uppercase tracking-wider px-1">Your Saved Addresses (${state.savedAddresses.length})</span>
+              <div id="saved-addresses-list" class="space-y-2">
+                ${this.renderSavedAddressesHTML(filteredAddresses)}
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      renderSavedAddressesHTML(addresses) {
+        if (addresses.length === 0) {
+          return `
+            <div class="p-6 bg-white border border-slate-200 rounded-2xl text-center space-y-2">
+              <i data-lucide="map-pin" class="w-8 h-8 mx-auto text-slate-300"></i>
+              <p class="text-xs font-bold text-slate-500">No saved addresses found</p>
+            </div>
+          `;
+        }
+
+        return addresses.map(a => `
+          <div class="p-4 bg-white border ${a.isSelected ? 'border-brand-600 ring-2 ring-brand-600/20' : 'border-slate-200/80'} rounded-2xl flex items-center justify-between shadow-xs">
+            <div onclick="app.selectAddress('${a.id}')" class="flex items-center space-x-3 cursor-pointer flex-1 min-w-0 pr-2">
+              <div class="w-9 h-9 rounded-xl ${a.type === 'HOME' ? 'bg-blue-50 text-blue-600' : 'bg-purple-50 text-purple-600'} flex items-center justify-center flex-shrink-0 font-black text-xs">
+                <i data-lucide="${a.type === 'HOME' ? 'home' : 'building'}" class="w-4 h-4"></i>
+              </div>
+              <div class="min-w-0">
+                <div class="flex items-center space-x-1.5">
+                  <span class="text-xs font-black text-slate-900">${a.type}</span>
+                  ${a.isDefault ? `<span class="px-1.5 py-0.2 bg-brand-100 text-brand-800 text-[8px] font-black rounded">DEFAULT</span>` : ''}
+                </div>
+                <p class="text-[11px] text-slate-500 font-medium truncate max-w-[190px]">${utils.escapeHTML(a.address)}</p>
+              </div>
+            </div>
+
+            <div class="flex items-center space-x-1">
+              <button onclick="app.navigateTo('add-address', { addressId: '${a.id}' })" class="p-1.5 rounded-lg text-slate-400 hover:text-slate-700">
+                <i data-lucide="pencil" class="w-3.5 h-3.5"></i>
+              </button>
+              
+              ${state.confirmDeleteAddressId === a.id ? `
+                <button onclick="app.deleteAddress('${a.id}')" class="px-2 py-1 rounded-lg bg-rose-500 text-white font-extrabold text-[9px] animate-pulse">
+                  CONFIRM
+                </button>
+              ` : `
+                <button onclick="app.confirmDeleteAddressPrompt('${a.id}')" class="p-1.5 rounded-lg text-slate-400 hover:text-rose-500">
+                  <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                </button>
+              `}
+            </div>
+          </div>
+        `).join('');
+      }
+
+      onAddressFilterInput(val) {
+        state.addressFilterQuery = val;
+        if (state._addressFilterDebounce) clearTimeout(state._addressFilterDebounce);
+        state._addressFilterDebounce = setTimeout(() => {
+          const listEl = document.getElementById('saved-addresses-list');
+          if (listEl) {
+            const filterQ = (state.addressFilterQuery || '').toLowerCase();
+            const filtered = state.savedAddresses.filter(a => 
+              !filterQ || (a.address || '').toLowerCase().includes(filterQ) || (a.type || '').toLowerCase().includes(filterQ)
+            );
+            listEl.innerHTML = this.renderSavedAddressesHTML(filtered);
+            lucide.createIcons();
+          }
+        }, 150);
+      }
+
+      confirmDeleteAddressPrompt(id) {
+        state.confirmDeleteAddressId = id;
+        this.renderLocationSelector(true);
+        lucide.createIcons();
+      }
+
+      // LIVE LOCATION SEARCH SCREEN (MODULE H: FREE-TEXT q= POI/BUSINESS MATCHING)
+      renderLocationSearch(isSoft = false) {
+        const container = document.getElementById('app-content');
+        container.innerHTML = `
+          <div class="space-y-4 ${isSoft ? '' : 'fade-in'}">
+            <div class="flex items-center space-x-2">
+              <button onclick="app.navigateTo('location-selector')" class="p-2 rounded-xl bg-white border border-slate-200 text-slate-700">
+                <i data-lucide="arrow-left" class="w-4 h-4"></i>
+              </button>
+              <h2 class="text-sm font-black text-slate-900 uppercase tracking-wider">Search Address or Area</h2>
+            </div>
+
+            <!-- Search Input Container -->
+            <div class="relative">
+              <i data-lucide="search" class="w-4 h-4 absolute left-3.5 top-3.5 text-slate-400"></i>
+              <input type="text" id="location-search-input" placeholder="Type shop, landmark, or street name..." 
+                value="${utils.escapeHTML(state.locationSearchQuery)}"
+                oninput="app.onLocationSearchInput(this.value)" autofocus
+                class="w-full bg-white border border-slate-200 rounded-2xl py-3 pl-10 pr-9 text-xs font-bold text-slate-900 focus:outline-none focus:border-brand-600 shadow-sm">
+              ${state.locationSearchQuery ? `
+                <button onclick="app.clearLocationSearch()" class="absolute right-3 top-3.5 text-slate-400 hover:text-slate-700">
+                  <i data-lucide="x" class="w-4 h-4"></i>
+                </button>
+              ` : ''}
+            </div>
+
+            <!-- Dynamic Search Results Region -->
+            <div id="location-search-results" class="space-y-2">
+              ${this.renderLocationSearchResultsHTML()}
+            </div>
+          </div>
+        `;
+
+        setTimeout(() => {
+          const inp = document.getElementById('location-search-input');
+          if (inp) inp.focus();
+        }, 100);
+      }
+
+      onLocationSearchInput(val) {
+        state.locationSearchQuery = val;
+        if (state._locationSearchDebounce) clearTimeout(state._locationSearchDebounce);
+
+        if (!val || val.trim().length < 3) {
+          state.locationSearchResults = [];
+          this.updateLocationSearchResultsDOM();
+          return;
+        }
+
+        const reqId = ++state._searchRequestId;
+        state._locationSearchDebounce = setTimeout(async () => {
+          try {
+            const lat = state.selectedAddress?.lat || 28.6139;
+            const lng = state.selectedAddress?.lng || 77.2090;
+            const viewbox = `${lng-0.5},${lat-0.5},${lng+0.5},${lat+0.5}`;
+            
+            // Free-text q= parameter supporting shop, business, and POI name lookups
+            const resp = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(val)}&format=json&addressdetails=1&limit=10&countrycodes=in&viewbox=${viewbox}&bounded=0`);
+            if (reqId !== state._searchRequestId) return;
+            const data = await resp.json();
+            state.locationSearchResults = data || [];
+          } catch(err) {
+            if (reqId !== state._searchRequestId) return;
+            state.locationSearchResults = 'ERROR';
+          }
+          this.updateLocationSearchResultsDOM();
+        }, 300);
+      }
+
+      clearLocationSearch() {
+        state.locationSearchQuery = '';
+        state.locationSearchResults = [];
+        const inp = document.getElementById('location-search-input');
+        if (inp) inp.value = '';
+        this.updateLocationSearchResultsDOM();
+      }
+
+      updateLocationSearchResultsDOM() {
+        const box = document.getElementById('location-search-results');
+        if (box) {
+          box.innerHTML = this.renderLocationSearchResultsHTML();
+          lucide.createIcons();
+        }
+      }
+
+      renderLocationSearchResultsHTML() {
+        if (state.locationSearchResults === 'ERROR') {
+          return `
+            <div class="p-6 bg-white border border-slate-200 rounded-2xl text-center space-y-2">
+              <i data-lucide="wifi-off" class="w-8 h-8 text-rose-400 mx-auto"></i>
+              <p class="text-xs font-bold text-slate-600">Couldn't load location results</p>
+              <button onclick="app.onLocationSearchInput(state.locationSearchQuery)" class="text-xs font-black text-brand-600 underline">Tap to retry</button>
+            </div>
+          `;
+        }
+
+        if (!state.locationSearchQuery || state.locationSearchQuery.trim().length < 3) {
+          return `
+            <div class="p-8 text-center text-slate-400 space-y-2">
+              <i data-lucide="map-pin" class="w-8 h-8 mx-auto text-slate-300"></i>
+              <p class="text-xs font-bold">Type at least 3 letters to search live places & stores</p>
+            </div>
+          `;
+        }
+
+        if (state.locationSearchResults.length === 0) {
+          return `
+            <div class="p-6 bg-white border border-slate-200 rounded-2xl text-center space-y-1">
+              <i data-lucide="search-x" class="w-8 h-8 text-slate-300 mx-auto"></i>
+              <p class="text-xs font-bold text-slate-600">No matching places found</p>
+              <p class="text-[10px] text-slate-400">Try searching with street or city name</p>
+            </div>
+          `;
+        }
+
+        return state.locationSearchResults.map(res => {
+          const namePart = res.display_name.split(',')[0] || res.display_name;
+          const addressPart = res.display_name.split(',').slice(1).join(',').trim();
+          const pincode = res.address?.postcode || '';
+
+          return `
+            <div onclick="app.selectSearchResult(${res.lat}, ${res.lon}, '${utils.escapeHTML(res.display_name).replace(/'/g, "\\'")}', '${pincode}')" 
+              class="p-3.5 bg-white border border-slate-200/80 rounded-2xl flex items-center space-x-3 cursor-pointer active:scale-98 transition shadow-xs hover:border-brand-600">
+              <div class="w-9 h-9 rounded-xl bg-brand-50 text-brand-600 flex items-center justify-center flex-shrink-0 font-bold">
+                <i data-lucide="map-pin" class="w-4 h-4"></i>
+              </div>
+              <div class="min-w-0 flex-1">
+                <h4 class="text-xs font-black text-slate-900 truncate">${utils.escapeHTML(namePart)}</h4>
+                <p class="text-[10px] text-slate-500 font-medium truncate">${utils.escapeHTML(addressPart)}</p>
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+
+      selectSearchResult(lat, lng, displayName, pincode = '') {
+        state.pendingPinLocation = {
+          lat: parseFloat(lat),
+          lng: parseFloat(lng),
+          displayName: displayName,
+          pincode: pincode
+        };
+        state.mapHasMoved = false;
+        this.navigateTo('location-pin-confirm');
+      }
+
+      // PIN CONFIRMATION MAP SCREEN (MODULE E: CARTO VOYAGER TILES)
+      renderPinConfirm(isSoft = false) {
+        const loc = state.pendingPinLocation || (state.selectedAddress || { lat: 28.6139, lng: 77.2090, displayName: 'Connaught Place, New Delhi', pincode: '110001' });
+        const container = document.getElementById('app-content');
+
+        container.innerHTML = `
+          <div class="space-y-3 ${isSoft ? '' : 'fade-in'} flex flex-col h-[82vh]">
+            <div class="flex items-center space-x-2 flex-shrink-0">
+              <button onclick="app.navigateTo('location-search')" class="p-2 rounded-xl bg-white border border-slate-200 text-slate-700">
+                <i data-lucide="arrow-left" class="w-4 h-4"></i>
+              </button>
+              <h2 class="text-sm font-black text-slate-900 uppercase tracking-wider">Confirm Pin Location</h2>
+            </div>
+
+            <!-- Map Viewport -->
+            <div class="relative flex-1 w-full rounded-3xl overflow-hidden border border-slate-200 shadow-md">
+              <div id="pin-confirm-map" class="w-full h-full"></div>
+
+              <!-- Center Fixed Pin Overlay -->
+              <div class="absolute inset-0 flex items-center justify-center pointer-events-none z-20 pb-8">
+                <div class="w-10 h-10 bg-brand-600 text-white rounded-full flex items-center justify-center shadow-2xl border-2 border-white marker-bounce">
+                  <i data-lucide="map-pin" class="w-6 h-6"></i>
+                </div>
+              </div>
+
+              <!-- Dismissible Hint Bubble -->
+              <div id="map-move-hint" class="absolute top-3 inset-x-4 z-30 bg-slate-900/90 text-white text-[10px] font-bold py-2 px-3 rounded-full text-center backdrop-blur shadow-lg border border-white/20 transition-opacity">
+                Move the pin to change location
+              </div>
+            </div>
+
+            <!-- Anchored Bottom Location Summary Card -->
+            <div class="bg-white p-4 rounded-3xl border border-slate-200/80 shadow-lg space-y-3 flex-shrink-0">
+              <div class="flex items-center space-x-3">
+                <div class="w-8 h-8 rounded-xl bg-brand-50 text-brand-600 flex items-center justify-center flex-shrink-0 font-bold">
+                  <i data-lucide="map-pin-check" class="w-4 h-4"></i>
+                </div>
+                <div class="min-w-0 flex-1">
+                  <span class="text-[9px] font-black text-brand-700 uppercase tracking-wider block">SELECTED LOCATION</span>
+                  <p id="pin-confirm-address-display" class="text-xs font-bold text-slate-900 truncate">${utils.escapeHTML(loc.displayName)}</p>
+                </div>
+              </div>
+
+              <div class='border-t border-slate-100 pt-2'>
+                <button type='button' onclick='app.toggleStreetViewPreview()' class='w-full flex items-center justify-between text-xs font-black text-slate-700 hover:text-brand-600 transition py-1'>
+                  <span class='flex items-center space-x-1.5'><i data-lucide='camera' class='w-3.5 h-3.5 text-brand-600'></i><span>Preview Street View</span></span>
+                  <i id='sv-chevron' data-lucide='chevron-down' class='w-3.5 h-3.5 text-slate-400'></i>
+                </button>
+                <div id='street-view-container' class='hidden mt-2 rounded-2xl overflow-hidden border border-slate-200 bg-slate-100 h-36 relative'>
+                  <iframe id='street-view-iframe' class='w-full h-full border-0' loading='lazy' onerror="this.style.display='none'; document.getElementById('sv-fallback').classList.remove('hidden');"></iframe>
+                  <div id='sv-fallback' class='hidden absolute inset-0 flex items-center justify-center p-3 text-center text-[10px] font-bold text-slate-500 bg-slate-50'>Street View not available for this location</div>
+                </div>
+              </div>
+
+              <button onclick='app.confirmPinLocation()' class='w-full bg-brand-600 hover:bg-brand-700 text-white font-black py-3.5 rounded-2xl shadow-lg shadow-brand-600/25 text-xs tracking-wider transition active:scale-98'>
+                CONFIRM LOCATION & PROCEED
+              </button>
+            </div>
+          </div>
+        `;
+
+        setTimeout(() => {
+          if (state.pinConfirmMapInstance) {
+            state.pinConfirmMapInstance.remove();
+          }
+
+          const map = L.map('pin-confirm-map', { zoomControl: false }).setView([loc.lat, loc.lng], 12);
+          state.pinConfirmMapInstance = map;
+
+          // Module E: CartoDB Voyager Raster Tiles
+          L.tileLayer(CARTO_TILE_URL, { maxZoom: 19, subdomains: 'abcd', attribution: CARTO_ATTRIBUTION }).addTo(map);
+
+          setTimeout(() => {
+            map.flyTo([loc.lat, loc.lng], 16, { duration: 1.2 });
+          }, 100);
+
+          state.pinConfirmLocationData = { lat: loc.lat, lng: loc.lng, address: loc.displayName, pincode: loc.pincode || '' };
+
+          map.on('movestart', () => {
+            const hint = document.getElementById('map-move-hint');
+            if (hint && !state.mapHasMoved) {
+              hint.classList.add('opacity-0');
+              state.mapHasMoved = true;
+            }
+          });
+
+          map.on('moveend', () => {
+            const center = map.getCenter();
+            state.pinConfirmLocationData.lat = center.lat;
+            state.pinConfirmLocationData.lng = center.lng;
+
+            if (state._pinGeocodeDebounce) clearTimeout(state._pinGeocodeDebounce);
+            const reqId = ++state._searchRequestId;
+
+            state._pinGeocodeDebounce = setTimeout(async () => {
+              try {
+                const resp = await fetch('https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=' + center.lat + '&longitude=' + center.lng + '&localityLanguage=en');
+                if (reqId !== state._searchRequestId) return;
+                const data = await resp.json();
+                const parts = [data.locality || data.city, data.principalSubdivision, data.countryName].filter(Boolean);
+                const resolvedAddr = parts.length > 0 ? parts.join(', ') : ('Location (' + center.lat.toFixed(4) + ', ' + center.lng.toFixed(4) + ')');
+                state.pinConfirmLocationData.address = resolvedAddr;
+                state.pinConfirmLocationData.pincode = data.postcode || '';
+                
+                const disp = document.getElementById('pin-confirm-address-display');
+                if (disp) disp.textContent = resolvedAddr;
+              } catch(e) {}
+            }, 400);
+          });
+        }, 150);
+      }
+
+      toggleStreetViewPreview() {
+        const box = document.getElementById('street-view-container');
+        const chevron = document.getElementById('sv-chevron');
+        const iframe = document.getElementById('street-view-iframe');
+        if (!box) return;
+        if (box.classList.contains('hidden')) {
+          box.classList.remove('hidden');
+          if (chevron) chevron.style.transform = 'rotate(180deg)';
+          const loc = state.pinConfirmLocationData || state.pendingPinLocation;
+          if (loc && iframe) {
+            iframe.src = 'https://maps.google.com/maps?layer=c&cbll=' + loc.lat + ',' + loc.lng + '&cbp=12,0,0,0,0&output=svembed';
+          }
+        } else {
+          box.classList.add('hidden');
+          if (chevron) chevron.style.transform = 'rotate(0deg)';
+        }
+        utils.hydrateIcons();
+      }
+
+      openDirections(lat, lng) {
+        window.open('https://www.google.com/maps/dir/?api=1&destination=' + lat + ',' + lng + '&travelmode=driving', '_blank');
+      }
+
+      confirmPinLocation() {
+        const loc = state.pinConfirmLocationData || state.pendingPinLocation;
+        if (!loc) return;
+
+        state.pendingAddressPrefill = {
+          fullAddress: loc.address || 'Selected Map Location',
+          lat: loc.lat,
+          lng: loc.lng,
+          pincode: loc.pincode || '',
+          landmark: ''
+        };
+
+        state.selectedAddress = {
+          id: 'pending_' + Date.now(),
+          type: 'HOME',
+          address: loc.address || 'Selected Map Location',
+          lat: loc.lat,
+          lng: loc.lng,
+          isSelected: true
+        };
+
+        state.locationBannerDismissed = true;
+        this.updateLocationBanner();
+        utils.toast("Location selected. Please choose address label.", "info");
+        this.navigateTo('add-address');
+      }
+
+      // ADD / EDIT ADDRESS SCREEN (MODULE E: CARTO TILES)
+      renderAddAddress(addressId = null, isSoft = false) {
+        let address = {};
+        const isEdit = !!addressId;
+
+        if (isEdit) {
+          address = state.savedAddresses.find(a => a.id === addressId) || {};
+        } else if (state.pendingAddressPrefill) {
+          address = {
+            address: state.pendingAddressPrefill.fullAddress,
+            lat: state.pendingAddressPrefill.lat,
+            lng: state.pendingAddressPrefill.lng,
+            pincode: state.pendingAddressPrefill.pincode || '',
+            landmark: state.pendingAddressPrefill.landmark || '',
+            type: 'HOME'
+          };
+          state.pendingAddressPrefill = null;
+        }
+
+        const container = document.getElementById('app-content');
+        state.selectedAddrLabel = (address.type || 'HOME').toUpperCase();
+
+        container.innerHTML = `
+          <div class="space-y-4 ${isSoft ? '' : 'fade-in'}">
+            <div class="flex items-center space-x-2">
+              <button onclick="app.navigateTo('location-selector')" class="p-2 rounded-xl bg-white border border-slate-200 text-slate-700">
+                <i data-lucide="arrow-left" class="w-4 h-4"></i>
+              </button>
+              <h2 class="text-sm font-black text-slate-900 uppercase tracking-wider">${isEdit ? 'Edit Address' : 'Add New Address'}</h2>
+            </div>
+
+            <form onsubmit="app.saveNewAddress(event, '${addressId || ''}')" class="bg-white p-5 rounded-3xl border border-slate-200/80 shadow-xs space-y-3">
+              <div>
+                <label class="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">Save Address As</label>
+                <div class="grid grid-cols-3 gap-2 p-1 bg-slate-100 rounded-2xl border border-slate-200/80">
+                  <button type="button" onclick="app.selectAddressLabel('HOME')" id="lbl-btn-HOME"
+                    class="py-2 rounded-xl text-xs font-black transition-all duration-200 ${state.selectedAddrLabel === 'HOME' ? 'bg-brand-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'}">
+                    HOME
+                  </button>
+                  <button type="button" onclick="app.selectAddressLabel('OFFICE')" id="lbl-btn-OFFICE"
+                    class="py-2 rounded-xl text-xs font-black transition-all duration-200 ${state.selectedAddrLabel === 'OFFICE' ? 'bg-brand-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'}">
+                    OFFICE
+                  </button>
+                  <button type="button" onclick="app.selectAddressLabel('OTHER')" id="lbl-btn-OTHER"
+                    class="py-2 rounded-xl text-xs font-black transition-all duration-200 ${state.selectedAddrLabel === 'OTHER' ? 'bg-brand-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'}">
+                    OTHER
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label class="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1">Full Address</label>
+                <textarea id="addr-full" rows="3" required placeholder="House/Flat No., Building Name, Street Name..."
+                  class="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 px-4 text-xs font-bold text-slate-900 focus:outline-none focus:border-brand-600">${utils.escapeHTML(address.address || '')}</textarea>
+                <span id="addr-full-err" class="text-[10px] text-rose-500 font-bold hidden mt-1 block">Full address must be at least 10 characters</span>
+              </div>
+
+              <div class="grid grid-cols-2 gap-2">
+                <div>
+                  <label class="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1">Landmark (Optional)</label>
+                  <input type="text" id="addr-landmark" value="${utils.escapeHTML(address.landmark || '')}" placeholder="Near Metro Station"
+                    class="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 px-4 text-xs font-bold text-slate-900 focus:outline-none focus:border-brand-600">
+                </div>
+                <div>
+                  <label class="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1">Pincode</label>
+                  <input type="text" id="addr-pincode" value="${utils.escapeHTML(address.pincode || '')}" required maxlength="6" placeholder="110001"
+                    class="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 px-4 text-xs font-bold text-slate-900 focus:outline-none focus:border-brand-600">
+                  <span id="addr-pin-err" class="text-[10px] text-rose-500 font-bold hidden mt-1 block">Exactly 6 digits</span>
+                </div>
+              </div>
+
+              <div class="space-y-1.5 pt-1">
+                <div class="flex items-center justify-between">
+                  <span class="text-[10px] font-black text-slate-500 uppercase tracking-wider">Pin Exact Location</span>
+                  <span id="map-drag-hint" class="text-[9px] font-extrabold text-brand-700 bg-brand-50 px-2 py-0.5 rounded-full border border-brand-200">Drag marker to adjust location</span>
+                </div>
+                <div id="addr-map" class="w-full h-36 rounded-2xl overflow-hidden border border-slate-200"></div>
+              </div>
+
+              <div id="addr-duplicate-err" class="p-3 rounded-xl bg-rose-50 text-rose-600 text-xs font-bold hidden">
+                This address is already saved in your account.
+              </div>
+
+              <button type="submit" class="w-full bg-brand-600 hover:bg-brand-700 text-white font-black py-3.5 rounded-2xl shadow-lg shadow-brand-600/25 text-xs active:scale-98">
+                ${isEdit ? 'UPDATE ADDRESS' : 'SAVE ADDRESS'}
+              </button>
+            </form>
+          </div>
+        `;
+
+        setTimeout(() => {
+          const mapEl = document.getElementById('addr-map');
+          if (!mapEl) return;
+
+          const lat = address.lat || (state.selectedAddress ? state.selectedAddress.lat : 28.6139);
+          const lng = address.lng || (state.selectedAddress ? state.selectedAddress.lng : 77.2090);
+          
+          const map = L.map('addr-map').setView([lat, lng], 14);
+          L.tileLayer(CARTO_TILE_URL, { maxZoom: 19, subdomains: 'abcd', attribution: CARTO_ATTRIBUTION }).addTo(map);
+
+          const marker = L.marker([lat, lng], { draggable: true }).addTo(map);
+          
+          if (marker._icon) {
+            marker._icon.classList.add('marker-bounce');
+          }
+
+          marker.on('dragend', (e) => {
+            const coord = e.target.getLatLng();
+            address.lat = coord.lat;
+            address.lng = coord.lng;
+            const hint = document.getElementById('map-drag-hint');
+            if (hint) {
+              hint.textContent = "Location adjusted ✓";
+              hint.className = "text-[9px] font-extrabold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200";
+            }
+          });
+        }, 150);
+      }
+
+      selectAddressLabel(label) {
+        state.selectedAddrLabel = label;
+        ['HOME', 'OFFICE', 'OTHER'].forEach(l => {
+          const btn = document.getElementById(`lbl-btn-${l}`);
+          if (btn) {
+            if (l === label) {
+              btn.className = "py-2 rounded-xl text-xs font-black transition-all duration-200 bg-brand-600 text-white shadow-xs";
+            } else {
+              btn.className = "py-2 rounded-xl text-xs font-black transition-all duration-200 text-slate-600 hover:text-slate-900";
+            }
+          }
+        });
+      }
+
+      async saveNewAddress(e, addressId) {
+        e.preventDefault();
+        const label = state.selectedAddrLabel || 'HOME';
+        const fullAddress = document.getElementById('addr-full').value.trim();
+        const landmark = document.getElementById('addr-landmark').value.trim();
+        const pincode = document.getElementById('addr-pincode').value.trim().replace(/\D/g, '');
+        const dupErr = document.getElementById('addr-duplicate-err');
+
+        const fullErr = document.getElementById('addr-full-err');
+        const pinErr = document.getElementById('addr-pin-err');
+
+        let valid = true;
+        if (fullAddress.length < 10) {
+          fullErr.classList.remove('hidden');
+          valid = false;
+        } else fullErr.classList.add('hidden');
+
+        if (pincode.length !== 6) {
+          pinErr.classList.remove('hidden');
+          valid = false;
+        } else pinErr.classList.add('hidden');
+
+        if (!valid) return;
+
+        const isDuplicate = state.savedAddresses.some(a => 
+          a.id !== addressId && 
+          a.address.toLowerCase() === fullAddress.toLowerCase() && 
+          a.pincode === pincode
+        );
+
+        if (isDuplicate) {
+          dupErr.classList.remove('hidden');
+          return;
+        } else dupErr.classList.add('hidden');
+
+        const payload = {
+          userId: state.user ? state.user.uid : 'guest',
+          label: label,
+          fullAddress: fullAddress,
+          landmark: landmark,
+          pincode: pincode,
+          lat: state.selectedAddress ? state.selectedAddress.lat : 28.6139,
+          lng: state.selectedAddress ? state.selectedAddress.lng : 77.2090,
+          isDefault: state.savedAddresses.length === 0,
+          createdAt: Date.now()
+        };
+
+        try {
+          let savedId = addressId;
+          if (state.user) {
+            if (addressId) {
+              await update(ref(db, `addresses/${addressId}`), payload);
+              utils.toast("Address updated!", "success");
+            } else {
+              const newRef = await push(ref(db, 'addresses'), payload);
+              savedId = newRef.key;
+              utils.toast("Address saved successfully!", "success");
+            }
+          } else {
+            savedId = 'addr_' + Date.now();
+            utils.toast("Address set!", "success");
+          }
+
+          state.selectedAddress = {
+            id: savedId,
+            type: label,
+            address: fullAddress,
+            landmark,
+            pincode,
+            lat: payload.lat,
+            lng: payload.lng,
+            isSelected: true
+          };
+
+          state.locationBannerDismissed = true;
+          this.updateLocationBanner();
+          await this.loadNearbyShops();
+          this.navigateTo('location-selector');
+        } catch (err) {
+          utils.toast("Failed to save address: " + err.message, "error");
+        }
+      }
+
+      async deleteAddress(addressId) {
+        state.confirmDeleteAddressId = null;
+        try {
+          await remove(ref(db, `addresses/${addressId}`));
+          utils.toast("Address deleted", "info");
+        } catch (err) {
+          utils.toast("Failed to delete address", "error");
+        }
+      }
+
+      selectAddress(addrId) {
+        const found = state.savedAddresses.find(a => a.id === addrId);
+        if (found) {
+          state.savedAddresses.forEach(a => a.isSelected = (a.id === addrId));
+          state.selectedAddress = found;
+          state.locationBannerDismissed = true;
+          this.updateLocationBanner();
+          utils.toast(`Delivery address set to ${found.type}`, "success");
+          this.loadNearbyShops();
+        }
+      }
+
+      detectCurrentGPS() {
+        if (!navigator.geolocation) {
+          utils.toast("Geolocation not supported by device", "error");
+          return;
+        }
+
+        navigator.geolocation.getCurrentPosition(
+          async (pos) => {
+            const lat = pos.coords.latitude;
+            const lng = pos.coords.longitude;
+            let addrStr = "Current GPS Location";
+
+            try {
+              const resp = await fetch('https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=' + lat + '&longitude=' + lng + '&localityLanguage=en');
+              const data = await resp.json();
+              const parts = [data.locality || data.city, data.principalSubdivision, data.countryName].filter(Boolean);
+              if (parts.length > 0) addrStr = parts.join(', ');
+            } catch(e) {}
+
+            state.selectedAddress = {
+              id: 'gps_' + Date.now(),
+              type: 'GPS',
+              address: addrStr,
+              lat: lat,
+              lng: lng,
+              isSelected: true
+            };
+
+            state.locationBannerDismissed = true;
+            this.updateLocationBanner();
+            utils.toast("GPS location set!", "success");
+            this.loadNearbyShops();
+          },
+          () => utils.toast("GPS Permission Denied", "error"),
+          { enableHighAccuracy: true }
+        );
+      }
+
+      // 4. HOME SCREEN (MODULE F: DISTRACTION-FREE SEARCH FOCUS HANDLERS)
+      renderHome(isSoft = false) {
+        const container = document.getElementById('app-content');
+        const shop = state.selectedShop;
+
+        container.innerHTML = `
+          <div class="space-y-4 ${isSoft ? '' : 'fade-in'}">
+            <!-- Sticky Quick-Search Bar with Focus Mode Handlers -->
+            <div class="relative sticky top-0 z-20 pt-1">
+              <i data-lucide="search" class="w-4 h-4 absolute left-3.5 top-4 text-slate-400"></i>
+              <input type="text" id="home-search-input" placeholder="Search '${shop?.shopName || 'groceries'}..." value="${utils.escapeHTML(state.searchQuery)}"
+                oninput="app.onSearchInput(this.value)"
+                onfocus="app.onSearchFocus()"
+                onblur="app.onSearchBlur()"
+                class="w-full bg-white border border-slate-200 rounded-2xl py-3 pl-10 pr-4 text-xs font-bold text-slate-900 focus:outline-none focus:border-brand-600 shadow-sm">
+            </div>
+
+            <!-- Hero Promotional Carousel Banner -->
+            <div class="w-full bg-gradient-to-r from-brand-700 via-brand-600 to-emerald-600 text-white p-4 rounded-3xl shadow-xl shadow-brand-600/20 relative overflow-hidden flex items-center justify-between">
+              <div class="space-y-1 z-10 max-w-[65%]">
+                <span class="px-2 py-0.5 rounded-full bg-white/20 text-[9px] font-black uppercase tracking-wider text-emerald-100">QUICK COMMERCE</span>
+                <h2 class="text-base font-black leading-tight tracking-tight">50% OFF Fresh Organic Produce</h2>
+                <p class="text-[10px] text-brand-100 font-bold">Guaranteed 30-Minute Delivery</p>
+              </div>              <div class='w-20 h-20 bg-white/10 rounded-2xl flex items-center justify-center backdrop-blur border border-white/20'>
+                <svg class='w-10 h-10 text-brand-100 bounce-subtle' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'><path d='M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z'></path><line x1='3' y1='6' x2='21' y2='6'></line><path d='M16 10a4 4 0 0 1-8 0'></path></svg>
+              </div>
+            </div>
+
+            <!-- Store Info Banner Card -->
+            <div onclick="app.navigateTo('shop-profile', { shopId: '${shop?.id}' })" class="p-3.5 bg-white border border-slate-200/80 rounded-2xl shadow-xs flex items-center justify-between cursor-pointer active:scale-98 transition">              <div class='flex items-center space-x-3'>
+                <div class='w-10 h-10 rounded-xl bg-brand-50 border border-brand-200 text-brand-700 flex items-center justify-center font-black'>
+                  <svg class='w-5 h-5 text-brand-700' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'><path d='m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7'></path><path d='M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8'></path><path d='M15 22v-4a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4'></path><path d='M2 7h20v5a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7z'></path></svg>
+                </div>
+                <div>
+                  <h3 class="text-xs font-black text-slate-900 truncate max-w-[180px]">${utils.escapeHTML(shop?.shopName || 'BazaarKart Store')}</h3>
+                  <p class="text-[9px] text-slate-400 font-extrabold truncate">Owner: ${utils.escapeHTML(shop?.ownerName || 'Partner')}</p>
+                  <div class="flex items-center space-x-2 text-[10px] font-extrabold text-slate-500 mt-0.5">
+                    <span class="flex items-center text-amber-500"><i data-lucide="star" class="w-3 h-3 fill-amber-400 mr-0.5"></i> ${shop?.rating || 4.9}</span>
+                    <span>•</span>
+                    <span>${shop?.distanceKm ? shop.distanceKm.toFixed(1) + ' KM' : '0.8 KM'}</span>
+                    <span>•</span>
+                    <span class="text-brand-700 font-black">${shop?.deliveryTimeMins || '30 Mins'}</span>
+                  </div>
+                </div>
+              </div>
+              <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+            </div>
+
+            <!-- Horizontal Category Chips -->
+            <div class="flex items-center space-x-2 overflow-x-auto custom-scrollbar pb-1">
+              ${state.categories.map(cat => `
+                <button onclick="app.filterCategory('${cat}')" 
+                  class="px-3.5 py-2 rounded-xl text-xs font-black whitespace-nowrap transition active:scale-95 ${state.activeCategory === cat ? 'bg-brand-600 text-white shadow-md shadow-brand-600/20' : 'bg-white text-slate-600 border border-slate-200/80 shadow-xs'}">
+                  ${cat}
+                </button>
+              `).join('')}
+            </div>            <!-- Products Region -->
+            <div id='home-product-grid'>
+              ${this.renderHomeProductGridHTML()}
+            </div>
+          </div>
+        `;
+        utils.hydrateIcons();
+      }
+
+      onSearchInput(val) {
+        state.searchQuery = val;
+        this.updateSearchDistractionFreeMode();
+        if (state._searchDebounce) clearTimeout(state._searchDebounce);
+        state._searchDebounce = setTimeout(() => {
+          const gridEl = document.getElementById('home-product-grid');
+          if (gridEl) {
+            gridEl.innerHTML = this.renderHomeProductGridHTML();
+            lucide.createIcons();
+          }
+        }, 200);
+      }
+
+      renderHomeProductGridHTML() {
+        const filtered = state.products.filter(p => {
+          const catMatch = state.activeCategory === 'All' || p.category === state.activeCategory;
+          const qMatch = !state.searchQuery || p.name.toLowerCase().includes(state.searchQuery.toLowerCase());
+          return catMatch && qMatch;
+        });
+
+        let suggestionsHTML = '';
+        if (state.searchQuery && state.searchQuery.trim().length > 0) {
+          const matches = state.products.filter(p => p.name.toLowerCase().includes(state.searchQuery.toLowerCase())).slice(0, 5);
+          if (matches.length > 0) {
+            suggestionsHTML = `
+              <div class="mb-3 space-y-1">
+                <span class="text-[9px] font-black text-slate-400 uppercase tracking-wider block">SEARCH SUGGESTIONS</span>
+                <div class="flex flex-wrap gap-1.5">
+                  ${matches.map(m => `
+                    <button onclick="app.applySuggestion('${utils.escapeHTML(m.name).replace(/'/g, "\\'")}')" class="px-2.5 py-1 rounded-lg bg-brand-50 border border-brand-200 text-brand-800 text-[10px] font-black hover:bg-brand-100 transition">
+                      ${utils.escapeHTML(m.name)}
+                    </button>
+                  `).join('')}
+                </div>
+              </div>
+            `;
+          }
+        }
+
+        return `
+          ${suggestionsHTML}
+          <div class="flex items-center justify-between mb-2 px-1">
+            <h3 class="text-xs font-black text-slate-900 uppercase tracking-wider">
+              ${state.searchQuery ? `Showing ${filtered.length} results for '${utils.escapeHTML(state.searchQuery)}'` : 'Top Recommended Items'}
+            </h3>
+            <span class="text-[10px] text-slate-400 font-extrabold">${filtered.length} ITEMS</span>
+          </div>
+
+          <div class="grid grid-cols-2 gap-2.5">
+            ${filtered.length === 0 ? `
+              <div class="col-span-2 text-center py-12 text-slate-400 text-xs font-bold">No products match your search</div>
+            ` : filtered.map(p => this.renderProductCard(p)).join('')}
+          </div>
+        `;
+      }
+
+      applySuggestion(name) {
+        state.searchQuery = name;
+        const inp = document.getElementById('home-search-input');
+        if (inp) inp.value = name;
+        this.updateSearchDistractionFreeMode();
+        const gridEl = document.getElementById('home-product-grid');
+        if (gridEl) {
+          gridEl.innerHTML = this.renderHomeProductGridHTML();
+          lucide.createIcons();
+        }
+      }
+
+      filterCategory(cat) {
+        state.activeCategory = cat;
+        this.renderHome(true);
+      }
+
+      // 5. COMPACT PRODUCT CARD
+      renderProductCard(p) {
+        const inCart = state.cart.find(item => item.productId === p.id);
+        const qty = inCart ? inCart.quantity : 0;
+        const isWishlist = state.wishlist.includes(p.id);
+        const discount = utils.calculateDiscountPercent(p.price, p.mrp);
+        const shop = state.nearbyShops.find(s => s.id === p.shopId) || state.selectedShop || {};
+
+        return `
+          <div class="bg-white border border-slate-200/80 rounded-2xl p-2 flex flex-col justify-between shadow-xs relative group active:scale-98 transition">
+            <!-- Badges -->
+            <div class="absolute top-1.5 left-1.5 flex flex-col space-y-0.5 z-10">
+              ${discount ? `<span class="px-1 py-0.2 rounded bg-rose-500 text-white font-black text-[7px] uppercase">${discount}% OFF</span>` : ''}
+              ${p.organicBadge ? `<span class="px-1 py-0.2 rounded bg-emerald-600 text-white font-black text-[7px] uppercase">ORGANIC</span>` : ''}
+            </div>
+
+            <!-- Wishlist Button -->
+            <button onclick="app.toggleWishlist('${p.id}')" class="absolute top-1.5 right-1.5 p-1 rounded-full bg-white/90 backdrop-blur text-slate-400 hover:text-rose-500 shadow-xs z-10">
+              <i data-lucide="heart" class="w-3 h-3 ${isWishlist ? 'text-rose-500 fill-rose-500' : ''}"></i>
+            </button>
+
+            <!-- Product Image Block -->
+            <div onclick="app.navigateTo('product-details', { productId: '${p.id}' })" class="w-full h-24 rounded-xl bg-slate-50 overflow-hidden mb-1.5 cursor-pointer relative flex items-center justify-center p-1">
+              ${p.image ? `<img src='${p.image}' class='w-full h-full object-contain' onerror="this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.classList.remove('hidden');"><div class='hidden w-full h-full flex items-center justify-center bg-brand-50 text-brand-700 rounded-xl font-black text-lg'>${utils.escapeHTML(p.name[0] || 'B')}</div>` : `<div class='w-full h-full flex items-center justify-center bg-brand-50 text-brand-700 rounded-xl font-black text-lg'>${utils.escapeHTML(p.name[0] || 'B')}</div>`}
+            </div>
+
+            <!-- Product Details -->
+            <div class="space-y-0.5">
+              <p class="text-[8px] text-slate-400 font-extrabold uppercase truncate">${p.category || 'Grocery'}</p>
+              <h4 onclick="app.navigateTo('product-details', { productId: '${p.id}' })" class="text-[11px] font-extrabold text-slate-900 line-clamp-1 cursor-pointer hover:text-brand-600 leading-tight">
+                ${utils.escapeHTML(p.name)}
+              </h4>
+              <p class="text-[8px] text-slate-400 font-bold truncate">${utils.escapeHTML(shop.shopName || 'BazaarKart')}</p>
+              <p class="text-[9px] text-slate-500 font-bold">${p.unit || '1 Unit'}</p>
+
+              <!-- Price & Add Action Button -->
+              <div class="flex items-center justify-between pt-1">
+                <div>
+                  <span class="text-xs font-black text-slate-900">${utils.formatCurrency(p.price)}</span>
+                  ${p.mrp ? `<span class="block text-[8px] text-slate-400 line-through font-semibold">${utils.formatCurrency(p.mrp)}</span>` : ''}
+                </div>
+
+                ${qty > 0 ? `
+                  <div class="flex items-center bg-brand-600 text-white rounded-lg px-1.5 py-0.5 font-black text-[11px] space-x-1.5 shadow-xs">
+                    <button onclick="app.updateCartQty('${p.id}', -1)" class="hover:opacity-80 active:scale-90">-</button>
+                    <span>${qty}</span>
+                    <button onclick="app.updateCartQty('${p.id}', 1)" class="hover:opacity-80 active:scale-90">+</button>
+                  </div>
+                ` : `
+                  <button onclick="app.addToCart('${p.id}')" class="px-2.5 py-1 rounded-lg bg-brand-50 border border-brand-200 text-brand-700 font-black text-[10px] hover:bg-brand-600 hover:text-white transition shadow-xs active:scale-90">
+                    ADD
+                  </button>
+                `}
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      toggleWishlist(productId) {
+        const idx = state.wishlist.indexOf(productId);
+        if (idx !== -1) {
+          state.wishlist.splice(idx, 1);
+          utils.toast("Removed from wishlist", "info");
+        } else {
+          state.wishlist.push(productId);
+          utils.toast("Added to wishlist!", "success");
+        }
+        if (state.user) localStorage.setItem(`bk_wishlist_${state.user.uid}`, JSON.stringify(state.wishlist));
+        this.refreshReactiveView();
+      }
+
+      addToCart(productId) {
+        const prod = state.products.find(p => p.id === productId);
+        if (!prod) return;
+
+        state.cart.push({
+          productId: prod.id,
+          shopId: prod.shopId,
+          name: prod.name,
+          price: prod.price,
+          mrp: prod.mrp,
+          unit: prod.unit,
+          image: prod.image,
+          quantity: 1
+        });
+
+        utils.toast("Added to cart!", "success");
+        this.refreshReactiveView();
+      }
+
+      updateCartQty(productId, change) {
+        const item = state.cart.find(i => i.productId === productId);
+        if (!item) return;
+
+        item.quantity += change;
+        if (item.quantity <= 0) {
+          state.cart = state.cart.filter(i => i.productId !== productId);
+        }
+
+        this.refreshReactiveView();
+      }
+
+      // 6. PRODUCT DETAILS
+      renderProductDetails(productId, isSoft = false) {
+        state.activeProductId = productId;
+        const product = state.products.find(p => p.id === productId);
+        if (!product) {
+          this.navigateTo('home');
+          return;
+        }
+
+        const shop = state.nearbyShops.find(s => s.id === product.shopId) || state.selectedShop || {};
+        const container = document.getElementById('app-content');
+        const inCart = state.cart.find(i => i.productId === product.id);
+        const qty = inCart ? inCart.quantity : 0;
+        const isWishlist = state.wishlist.includes(product.id);
+        const discount = utils.calculateDiscountPercent(product.price, product.mrp);
+
+        const related = state.products.filter(p => p.id !== product.id && (p.category === product.category || p.shopId === product.shopId)).slice(0, 4);
+
+        container.innerHTML = `
+          <div class="space-y-4 ${isSoft ? '' : 'fade-in'} pb-6">
+            <div class="flex items-center justify-between">
+              <button onclick="app.navigateTo('home')" class="p-2 rounded-xl bg-white border border-slate-200 text-slate-700 active:scale-90 transition">
+                <i data-lucide="arrow-left" class="w-4 h-4"></i>
+              </button>
+              <span class="text-xs font-black text-slate-900 uppercase tracking-wider">Product Details</span>
+              <button onclick="app.toggleWishlist('${product.id}')" class="p-2 rounded-xl bg-white border border-slate-200 text-slate-400 hover:text-rose-500 shadow-xs active:scale-90 transition">
+                <i data-lucide="heart" class="w-4 h-4 ${isWishlist ? 'text-rose-500 fill-rose-500' : ''}"></i>
+              </button>
+            </div>
+
+            <div class="w-full h-64 rounded-3xl bg-white border border-slate-200/80 overflow-hidden flex items-center justify-center p-4 relative shadow-xs">
+              <div class="absolute top-3 left-3 flex flex-col space-y-1.5 z-10">
+                ${discount ? `<span class="px-2 py-0.5 rounded-lg bg-rose-500 text-white font-black text-[9px] uppercase tracking-wider shadow-xs">${discount}% OFF</span>` : ''}
+                ${product.organicBadge ? `<span class="px-2 py-0.5 rounded-lg bg-emerald-600 text-white font-black text-[9px] uppercase tracking-wider shadow-xs">ORGANIC</span>` : ''}
+                ${product.freshBadge ? `<span class="px-2 py-0.5 rounded-lg bg-brand-600 text-white font-black text-[9px] uppercase tracking-wider shadow-xs">FARM FRESH</span>` : ''}
+              </div>
+
+              ${product.image ? `<img src="${product.image}" class="w-full h-full object-contain">` : `<i data-lucide="image" class="w-16 h-16 text-slate-300"></i>`}
+            </div>
+
+            <div class="bg-white p-4 rounded-3xl border border-slate-200/80 space-y-3 shadow-xs">
+              <div class="flex items-center justify-between">
+                <span class="px-2.5 py-1 rounded-full bg-brand-50 text-brand-700 border border-brand-200/60 text-[10px] font-black uppercase tracking-wider">${product.category || 'Grocery'}</span>
+                <span class="text-xs font-extrabold text-slate-500">${product.unit || '1 Unit'}</span>
+              </div>
+
+              <h2 class="text-lg font-black text-slate-900 leading-snug">${utils.escapeHTML(product.name)}</h2>
+
+              <div onclick="app.navigateTo('shop-profile', { shopId: '${shop.id}' })" class="p-2.5 bg-slate-50 border border-slate-200/80 rounded-2xl flex items-center justify-between cursor-pointer active:scale-98 transition">
+                <div class="flex items-center space-x-2.5">
+                  <div class="w-7 h-7 rounded-lg bg-brand-600 text-white flex items-center justify-center font-black">
+                    <i data-lucide="store" class="w-3.5 h-3.5"></i>
+                  </div>
+                  <div>
+                    <h4 class="text-xs font-black text-slate-900">${utils.escapeHTML(shop.shopName || 'Partner Store')}</h4>
+                    <p class="text-[9px] text-slate-400 font-bold">Owner: ${utils.escapeHTML(shop.ownerName || 'Merchant')}</p>
+                  </div>
+                </div>
+                <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+              </div>
+
+              <div class="flex items-baseline space-x-2 pt-1 border-t border-slate-100">
+                <span class="text-2xl font-black text-slate-900">${utils.formatCurrency(product.price)}</span>
+                ${product.mrp ? `<span class="text-xs text-slate-400 line-through font-bold">${utils.formatCurrency(product.mrp)}</span>` : ''}
+                ${discount ? `<span class="text-[10px] text-emerald-600 font-extrabold bg-emerald-50 px-2 py-0.5 rounded-md">Save ${discount}%</span>` : ''}
+              </div>
+            </div>
+
+            <div class="bg-white p-4 rounded-3xl border border-slate-200/80 space-y-1.5 shadow-xs">
+              <h4 class="text-xs font-black text-slate-900 uppercase tracking-wider">About This Product</h4>
+              <p class="text-xs text-slate-600 leading-relaxed font-medium">
+                ${utils.escapeHTML(product.description || 'Sourced fresh daily from local verified farms. Rigorous 3-step quality inspected to ensure 100% satisfaction.')}
+              </p>
+            </div>
+
+            <div class="pt-1">
+              ${qty > 0 ? `
+                <div class="flex items-center justify-between bg-brand-600 text-white rounded-2xl p-3 px-4 font-black shadow-lg shadow-brand-600/20">
+                  <span class="text-xs uppercase tracking-wider">In Your Cart (${qty})</span>
+                  <div class="flex items-center space-x-3 text-base">
+                    <button onclick="app.updateCartQty('${product.id}', -1)" class="w-8 h-8 rounded-xl bg-brand-700 flex items-center justify-center active:scale-90 transition">-</button>
+                    <span class="font-black">${qty}</span>
+                    <button onclick="app.updateCartQty('${product.id}', 1)" class="w-8 h-8 rounded-xl bg-brand-700 flex items-center justify-center active:scale-90 transition">+</button>
+                  </div>
+                </div>
+              ` : `
+                <button onclick="app.addToCart('${product.id}')" class="w-full bg-brand-600 hover:bg-brand-700 text-white font-black py-4 rounded-2xl shadow-xl shadow-brand-600/25 text-xs tracking-wider transition active:scale-98 flex items-center justify-center space-x-2">
+                  <i data-lucide="shopping-cart" class="w-4 h-4"></i>
+                  <span>ADD TO CART • ${utils.formatCurrency(product.price)}</span>
+                </button>
+              `}
+            </div>
+
+            ${related.length > 0 ? `
+              <div class="pt-2 space-y-2">
+                <h4 class="text-xs font-black text-slate-900 uppercase tracking-wider px-1">You May Also Like</h4>
+                <div class="grid grid-cols-2 gap-2.5">
+                  ${related.map(p => this.renderProductCard(p)).join('')}
+                </div>
+              </div>
+            ` : ''}
+          </div>
+        `;
+      }
+
+      // 7. SHOP PROFILE VIEW
+      renderShopProfile(shopId, isSoft = false) {
+        const shop = state.nearbyShops.find(s => s.id === shopId) || state.selectedShop;
+        const container = document.getElementById('app-content');
+
+        container.innerHTML = `
+          <div class="space-y-4 ${isSoft ? '' : 'fade-in'}">
+            <button onclick="app.navigateTo('home')" class="p-2 rounded-xl bg-white border border-slate-200 text-slate-700">
+              <i data-lucide="arrow-left" class="w-4 h-4"></i>
+            </button>
+
+            <div class="p-5 bg-white border border-slate-200 rounded-3xl space-y-3 shadow-xs">
+              <div class="flex items-center space-x-3">
+                <div class="w-12 h-12 rounded-2xl bg-brand-600 text-white flex items-center justify-center font-black shadow-md shadow-brand-600/20">
+                  <i data-lucide="store" class="w-6 h-6"></i>
+                </div>
+                <div>
+                  <h2 class="text-sm font-black text-slate-900">${utils.escapeHTML(shop?.shopName)}</h2>
+                  <p class="text-[11px] text-slate-500 font-bold mt-0.5">Owner: ${utils.escapeHTML(shop?.ownerName || 'Partner Store')}</p>
+                </div>
+              </div>
+
+              <div class="grid grid-cols-3 gap-2 pt-2 border-t border-slate-100 text-center text-xs font-bold">
+                <div class="p-2 bg-slate-50 rounded-xl"><span class="block text-[9px] text-slate-400">RATING</span><span class="text-amber-500 font-black">★ ${shop?.rating || 4.9}</span></div>
+                <div class="p-2 bg-slate-50 rounded-xl"><span class="block text-[9px] text-slate-400">DISTANCE</span><span>${shop?.distanceKm ? shop.distanceKm.toFixed(1) + ' KM' : '0.8 KM'}</span></div>
+                <div class="p-2 bg-slate-50 rounded-xl"><span class="block text-[9px] text-slate-400">DELIVERY</span><span class="text-brand-700 font-black">${shop?.deliveryTimeMins || '30 Mins'}</span></div>
+              </div>
+            </div>
+
+            <div>
+              <h3 class="text-xs font-black text-slate-900 uppercase tracking-wider mb-2">Store Products</h3>
+              <div class="grid grid-cols-2 gap-2.5">
+                ${state.products.map(p => this.renderProductCard(p)).join('')}
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      // 8. CART VIEW
+      renderCart(isSoft = false) {
+        const container = document.getElementById('app-content');
+        const subtotal = state.cart.reduce((acc, item) => acc + (item.price * item.quantity), 0);
+        const deliveryFee = subtotal >= 99 || subtotal === 0 ? 0 : 25;
+        const grandTotal = subtotal + deliveryFee;
+
+        container.innerHTML = `
+          <div class="space-y-4 ${isSoft ? '' : 'fade-in'}">
+            <h2 class="text-sm font-black text-slate-900 uppercase tracking-wider">Your Shopping Cart</h2>
+
+            ${state.cart.length === 0 ? `
+              <div class="text-center py-16 text-slate-400 space-y-3">
+                <i data-lucide="shopping-cart" class="w-12 h-12 mx-auto opacity-30"></i>
+                <p class="text-xs font-black">Your cart is empty</p>
+                <button onclick="app.navigateTo('home')" class="px-5 py-2.5 rounded-2xl bg-brand-600 text-white font-black text-xs shadow-md shadow-brand-600/20">Browse Products</button>
+              </div>
+            ` : `
+              <div class="p-3.5 rounded-2xl ${subtotal >= 99 ? 'bg-emerald-50 border border-emerald-200 text-emerald-800' : 'bg-amber-50 border border-amber-200 text-amber-800'} text-xs font-black flex items-center space-x-2">
+                <i data-lucide="truck" class="w-4 h-4 flex-shrink-0"></i>
+                <span>${subtotal >= 99 ? '🎉 You unlocked FREE Delivery!' : `Add ${utils.formatCurrency(99 - subtotal)} more for FREE Delivery`}</span>
+              </div>
+
+              <div class="space-y-2">
+                ${state.cart.map(item => {
+                  const shop = state.nearbyShops.find(s => s.id === item.shopId) || state.selectedShop || {};
+                  return `
+                    <div class="p-3 bg-white border border-slate-200/80 rounded-2xl flex items-center justify-between">
+                      <div class="flex items-center space-x-3">
+                        <div class="w-12 h-12 rounded-xl bg-slate-50 overflow-hidden flex items-center justify-center p-1 border border-slate-100">
+                          ${item.image ? `<img src="${item.image}" class="w-full h-full object-contain">` : `<i data-lucide="image" class="w-5 h-5 text-slate-400"></i>`}
+                        </div>
+                        <div>
+                          <h4 class="text-xs font-extrabold text-slate-900 line-clamp-1">${utils.escapeHTML(item.name)}</h4>
+                          <p class="text-[9px] text-slate-400 font-bold truncate">${utils.escapeHTML(shop.shopName || 'Store')} • ${utils.escapeHTML(shop.ownerName || 'Merchant')}</p>
+                          <p class="text-[10px] text-slate-500 font-bold">${utils.formatCurrency(item.price)} / ${item.unit}</p>
+                        </div>
+                      </div>
+
+                      <div class="flex items-center bg-brand-50 border border-brand-200 text-brand-700 rounded-xl px-2 py-1 font-black text-xs space-x-2">
+                        <button onclick="app.updateCartQty('${item.productId}', -1)">-</button>
+                        <span>${item.quantity}</span>
+                        <button onclick="app.updateCartQty('${item.productId}', 1)">+</button>
+                      </div>
+                    </div>
+                  `;
+                }).join('')}
+              </div>
+
+              <div class="p-4 bg-white border border-slate-200/80 rounded-2xl space-y-2 text-xs">
+                <h4 class="font-black text-slate-900 border-b border-slate-100 pb-2 uppercase tracking-wider text-[10px]">Bill Summary</h4>
+                <div class="flex justify-between text-slate-600 font-semibold"><span>Item Total</span><span>${utils.formatCurrency(subtotal)}</span></div>
+                <div class="flex justify-between text-slate-600 font-semibold">
+                  <span>Delivery Charge</span>
+                  <span class="${deliveryFee === 0 ? 'text-emerald-600 font-black' : ''}">${deliveryFee === 0 ? 'FREE' : utils.formatCurrency(deliveryFee)}</span>
+                </div>
+                <div class="flex justify-between font-black text-slate-900 border-t border-slate-100 pt-2 text-sm">
+                  <span>Grand Total</span>
+                  <span class="text-brand-600">${utils.formatCurrency(grandTotal)}</span>
+                </div>
+              </div>
+
+              <button onclick="app.navigateTo('checkout')" class="w-full bg-brand-600 hover:bg-brand-700 text-white font-black py-4 rounded-2xl shadow-xl shadow-brand-600/25 text-xs flex items-center justify-between px-5">
+                <span>PROCEED TO CHECKOUT</span>
+                <span>${utils.formatCurrency(grandTotal)} <i data-lucide="arrow-right" class="w-4 h-4 inline ml-1"></i></span>
+              </button>
+            `}
+          </div>
+        `;
+      }
+
+      // 9. CHECKOUT VIEW
+      renderCheckout(isSoft = false) {
+        const subtotal = state.cart.reduce((acc, item) => acc + (item.price * item.quantity), 0);
+        const deliveryFee = subtotal >= 99 ? 0 : 25;
+        const grandTotal = subtotal + deliveryFee;
+        const container = document.getElementById('app-content');
+
+        container.innerHTML = `
+          <div class="space-y-4 ${isSoft ? '' : 'fade-in'}">
+            <div class="flex items-center space-x-2">
+              <button onclick="app.navigateTo('cart')" class="p-2 rounded-xl bg-white border border-slate-200">
+                <i data-lucide="arrow-left" class="w-4 h-4"></i>
+              </button>
+              <h2 class="text-sm font-black text-slate-900 uppercase">Checkout Details</h2>
+            </div>
+
+            <div class="p-4 bg-white border border-slate-200/80 rounded-2xl space-y-2 shadow-xs">
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-black text-slate-900">Delivery Address</span>
+                <span class="px-2 py-0.5 rounded-md bg-brand-100 text-brand-800 text-[9px] font-black">${state.selectedAddress ? state.selectedAddress.type : 'LOCATION'}</span>
+              </div>
+              <p class="text-xs text-slate-600 font-medium">${utils.escapeHTML(state.selectedAddress ? state.selectedAddress.address : 'Select location')}</p>
+            </div>
+
+            <div class="p-4 bg-white border border-slate-200/80 rounded-2xl space-y-3 shadow-xs">
+              <span class="text-xs font-black text-slate-900 block">Select Payment Method</span>
+              
+              <label class="p-3 bg-brand-50 border border-brand-200 rounded-xl flex items-center justify-between cursor-pointer">
+                <div class="flex items-center space-x-2">
+                  <i data-lucide="banknote" class="w-5 h-5 text-brand-600"></i>
+                  <span class="text-xs font-black text-slate-900">Cash on Delivery (COD)</span>
+                </div>
+                <input type="radio" name="payment" checked class="accent-brand-600">
+              </label>
+
+              <label class="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between cursor-pointer">
+                <div class="flex items-center space-x-2">
+                  <i data-lucide="qr-code" class="w-5 h-5 text-slate-600"></i>
+                  <span class="text-xs font-bold text-slate-700">UPI / GPay / PhonePe</span>
+                </div>
+                <input type="radio" name="payment" class="accent-brand-600">
+              </label>
+            </div>
+
+            <button onclick="app.placeOrder()" class="w-full bg-brand-600 hover:bg-brand-700 text-white font-black py-4 rounded-2xl shadow-2xl shadow-brand-600/30 text-xs flex items-center justify-center space-x-2 active:scale-98">
+              <i data-lucide="check-circle" class="w-4 h-4"></i>
+              <span>PLACE ORDER (${utils.formatCurrency(grandTotal)})</span>
+            </button>
+          </div>
+        `;
+      }
+
+      async placeOrder() {
+        if (state.cart.length === 0) return;
+
+        const subtotal = state.cart.reduce((acc, item) => acc + (item.price * item.quantity), 0);
+        const deliveryFee = subtotal >= 99 ? 0 : 25;
+        const grandTotal = subtotal + deliveryFee;
+
+        const newOrderRef = push(ref(db, 'orders'));
+        const orderId = newOrderRef.key;
+
+        const orderObj = {
+          shopId: state.selectedShop ? state.selectedShop.id : '',
+          customerId: state.user ? state.user.uid : 'guest',
+          customerName: state.user ? state.user.name : 'Guest Customer',
+          customerPhone: state.user ? state.user.phone : '',
+          deliveryAddress: state.selectedAddress ? state.selectedAddress.address : '',
+          items: state.cart,
+          subtotal: subtotal,
+          deliveryCharge: deliveryFee,
+          totalAmount: grandTotal,
+          status: 'Confirmed',
+          otp: Math.floor(1000 + Math.random() * 9000).toString(),
+          createdAt: Date.now()
+        };
+
+        try {
+          await set(newOrderRef, orderObj);
+          state.cart = [];
+          this.updateFloatingCartBar();
+          
+          confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
+          this.navigateTo('order-success', { orderId });
+        } catch (err) {
+          utils.toast("Failed to place order: " + err.message, "error");
+        }
+      }
+
+      // 10. ANIMATED ORDER SUCCESS VIEW
+      renderOrderSuccess(orderId, isSoft = false) {
+        const container = document.getElementById('app-content');
+        container.innerHTML = `
+          <div class="flex flex-col items-center justify-center min-h-[85vh] px-4 text-center ${isSoft ? '' : 'fade-in'} space-y-5">
+            <div class="w-20 h-20 bg-brand-600 rounded-3xl flex items-center justify-center text-white shadow-2xl shadow-brand-600/40 pulse-glow">
+              <i data-lucide="check-check" class="w-10 h-10"></i>
+            </div>
+            
+            <div class="space-y-1">
+              <h2 class="text-xl font-black text-slate-900 tracking-tight">Order Confirmed!</h2>
+              <p class="text-xs text-slate-500 font-bold">Arriving in <span class="text-brand-700 font-black">30 Minutes</span></p>
+            </div>
+
+            <div class="p-4 bg-white border border-slate-200 rounded-2xl w-full max-w-xs space-y-2 shadow-xs">
+              <span class="text-[10px] text-slate-400 font-extrabold uppercase tracking-wider block">Order Reference</span>
+              <div class="text-sm font-black font-mono text-slate-800">#${orderId.slice(-6).toUpperCase()}</div>
+            </div>
+
+            <button onclick="app.navigateTo('tracking', { orderId: '${orderId}' })" class="w-full bg-brand-600 hover:bg-brand-700 text-white font-black py-4 rounded-2xl shadow-xl shadow-brand-600/25 text-xs flex items-center justify-center space-x-2">
+              <i data-lucide="navigation" class="w-4 h-4"></i>
+              <span>TRACK DELIVERY LIVE</span>
+            </button>
+          </div>
+        `;
+      }
+
+      // 11. ORDERS HISTORY VIEW
+      renderOrders(isSoft = false) {
+        const container = document.getElementById('app-content');
+
+        container.innerHTML = `
+          <div class="space-y-4 ${isSoft ? '' : 'fade-in'}">
+            <h2 class="text-sm font-black text-slate-900 uppercase tracking-wider">Your Past Orders</h2>
+
+            ${state.orders.length === 0 ? `
+              <div class="text-center py-16 text-slate-400 text-xs font-black">No order history found</div>
+            ` : state.orders.map(o => {
+              const shop = state.nearbyShops.find(s => s.id === o.shopId) || state.selectedShop || {};
+              return `
+                <div onclick="app.navigateTo('tracking', { orderId: '${o.id}' })" class="p-4 bg-white border border-slate-200/80 rounded-2xl space-y-3 cursor-pointer hover:border-slate-300 shadow-xs active:scale-98 transition">
+                  <div class="flex items-center justify-between border-b border-slate-100 pb-2">
+                    <div>
+                      <span class="text-xs font-black text-slate-900">Order #${o.id.slice(-6).toUpperCase()}</span>
+                      <p class="text-[9px] text-slate-400 font-bold truncate">${utils.escapeHTML(shop.shopName || 'BazaarKart Merchant')} • ${utils.escapeHTML(shop.ownerName || 'Merchant')}</p>
+                      <span class="block text-[10px] text-slate-400 font-semibold">${utils.formatDate(o.createdAt)}</span>
+                    </div>
+                    <span class="px-2.5 py-1 rounded-full text-[10px] font-black bg-brand-50 text-brand-700 border border-brand-200">
+                      ${o.status}
+                    </span>
+                  </div>
+
+                  <div class="text-xs text-slate-600 font-medium space-y-1">
+                    ${(o.items || []).map(it => `<div>${it.quantity}x ${utils.escapeHTML(it.name)}</div>`).join('')}
+                  </div>
+
+                  <div class="flex items-center justify-between border-t border-slate-100 pt-2 text-xs">
+                    <span class="font-black text-slate-900">${utils.formatCurrency(o.totalAmount)}</span>
+                    <span class="text-brand-600 font-black flex items-center">Track Live <i data-lucide="chevron-right" class="w-3.5 h-3.5 ml-0.5"></i></span>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        `;
+      }
+
+      // 12. INTERACTIVE MAP & LIVE TRACKING EXPERIENCE (MODULE E & G POLISH)
+      renderOrderTracking(orderId, isSoft = false) {
+        const order = state.orders.find(o => o.id === orderId);
+        if (!order) {
+          this.navigateTo('orders');
+          return;
+        }
+
+        const shop = state.nearbyShops.find(s => s.id === order.shopId) || state.selectedShop || {};
+        const container = document.getElementById('app-content');
+        const steps = ['Confirmed', 'Accepted', 'Preparing', 'Packed', 'Out for Delivery', 'Delivered'];
+        const currentIdx = steps.indexOf(order.status) !== -1 ? steps.indexOf(order.status) : 2;
+
+        const userLat = state.selectedAddress ? state.selectedAddress.lat : 28.6139;
+        const userLng = state.selectedAddress ? state.selectedAddress.lng : 77.2090;
+        const shopLat = shop.latitude || (userLat + 0.008);
+        const shopLng = shop.longitude || (userLng + 0.008);
+
+        const elapsedMins = Math.floor((Date.now() - (order.createdAt || Date.now())) / 60000);
+        const remainingMins = Math.max(1, 30 - elapsedMins);
+        const estTime = new Date((order.createdAt || Date.now()) + 30 * 60000);
+        const estTimeStr = estTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+        let currentStepIdx = 0;
+        if (order.status === 'Preparing' || order.status === 'Accepted') currentStepIdx = 1;
+        else if (order.status === 'Packed' || order.status === 'Out for Delivery') currentStepIdx = 2;
+        else if (order.status === 'Delivered') currentStepIdx = 3;
+
+        const progressPercent = currentStepIdx === 0 ? 0 : (currentStepIdx === 1 ? 33 : (currentStepIdx === 2 ? 66 : 100));
+        const mainSteps = ['Confirmed', 'Preparing', 'On the way', 'Delivered'];
+
+        container.innerHTML = `
+          <div class="space-y-4 ${isSoft ? '' : 'fade-in'}">
+            <div class='flex items-center space-x-2'>
+              <button onclick="app.navigateTo('orders')" class='p-2 rounded-xl bg-white border border-slate-200'>
+                <i data-lucide='arrow-left' class='w-4 h-4'></i>
+              </button>
+              <h2 class='text-sm font-black text-slate-900 uppercase tracking-wider'>Your Order Status</h2>
+            </div>
+
+            <!-- Top Map Viewport (Map on Top) -->
+            <div class='relative w-full h-64 sm:h-72 rounded-3xl overflow-hidden border border-slate-200/80 shadow-md flex-shrink-0'>
+              <div id='tracking-map' class='w-full h-full'></div>
+            </div>
+
+            <!-- Bottom Card Section (Time and Order Status Together Below Map) -->
+            <div class='bg-white rounded-3xl border border-slate-200/80 shadow-lg overflow-hidden space-y-0'>
+              
+              <!-- Dark Merchant Info Header Bar -->
+              <div class='bg-slate-900 text-white p-3.5 px-4 flex items-center justify-between'>
+                <div class='flex items-center space-x-3 min-w-0 flex-1 pr-2'>
+                  <div class='w-10 h-10 rounded-2xl bg-brand-600 text-white flex items-center justify-center font-black flex-shrink-0 border border-brand-400'>
+                    <i data-lucide='store' class='w-5 h-5'></i>
+                  </div>
+                  <div class='min-w-0 flex-1'>
+                    <h4 class='text-xs font-black text-white truncate'>${utils.escapeHTML(shop.shopName || 'BazaarKart Store')}</h4>
+                    <p class='text-[10px] text-slate-300 font-medium truncate'>Merchant Partner • ${utils.escapeHTML(shop.ownerName || 'Partner')}</p>
+                  </div>
+                </div>
+
+                <div class='flex items-center space-x-2 flex-shrink-0'>
+                  <button onclick="app.openChat('${order.shopId}')" class='w-9 h-9 rounded-full bg-slate-800 hover:bg-slate-700 text-white flex items-center justify-center active:scale-90 transition border border-slate-700'>
+                    <i data-lucide='message-square' class='w-4 h-4'></i>
+                  </button>
+                  <a href='tel:+91${shop.phone || '9876543210'}' class='w-9 h-9 rounded-full bg-slate-800 hover:bg-slate-700 text-white flex items-center justify-center active:scale-90 transition border border-slate-700'>
+                    <i data-lucide='phone-call' class='w-4 h-4'></i>
+                  </a>
+                </div>
+              </div>
+
+              <!-- Main Card Body: Delivery Time & Horizontal Step Indicators -->
+              <div class='p-4 space-y-4'>
+                <div class='text-center space-y-0.5'>
+                  <h3 class='text-sm font-black text-slate-900'>
+                    Estimated delivery time is <span class='text-brand-600 font-extrabold'>${estTimeStr}</span>
+                  </h3>
+                  <p class='text-[11px] text-slate-500 font-semibold'>
+                    ${order.status === 'Delivered' ? 'Order delivered successfully!' : `Arriving in ~${remainingMins} minutes • On its way to you!`}
+                  </p>
+                </div>
+
+                <!-- 4-Step Icon Progress Indicator -->
+                <div class='relative pt-2 pb-1 px-1'>
+                  <div class='absolute top-6 left-8 right-8 h-1 bg-slate-200 rounded-full -z-0'>
+                    <div style='width: ${progressPercent}%' class='h-full bg-brand-500 rounded-full transition-all duration-500'></div>
+                  </div>
+
+                  <div class='grid grid-cols-4 gap-2 text-center relative z-10'>
+                    <div class='flex flex-col items-center space-y-1.5'>
+                      <div class='w-9 h-9 rounded-full flex items-center justify-center transition-all ${currentStepIdx >= 0 ? 'bg-brand-500 text-white ring-4 ring-brand-100 shadow-md' : 'bg-slate-100 text-slate-400 border border-slate-200'}'>
+                        <i data-lucide='clipboard-check' class='w-4 h-4'></i>
+                      </div>
+                      <span class='text-[9px] font-black ${currentStepIdx >= 0 ? 'text-slate-900' : 'text-slate-400'}'>Confirmed</span>
+                    </div>
+
+                    <div class='flex flex-col items-center space-y-1.5'>
+                      <div class='w-9 h-9 rounded-full flex items-center justify-center transition-all ${currentStepIdx >= 1 ? 'bg-brand-500 text-white ring-4 ring-brand-100 shadow-md' : 'bg-slate-100 text-slate-400 border border-slate-200'}'>
+                        <i data-lucide='package' class='w-4 h-4'></i>
+                      </div>
+                      <span class='text-[9px] font-black ${currentStepIdx >= 1 ? 'text-slate-900' : 'text-slate-400'}'>Preparing</span>
+                    </div>
+
+                    <div class='flex flex-col items-center space-y-1.5'>
+                      <div class='w-9 h-9 rounded-full flex items-center justify-center transition-all ${currentStepIdx >= 2 ? 'bg-brand-500 text-white ring-4 ring-brand-100 shadow-md' : 'bg-slate-100 text-slate-400 border border-slate-200'}'>
+                        <i data-lucide='truck' class='w-4 h-4'></i>
+                      </div>
+                      <span class='text-[9px] font-black ${currentStepIdx >= 2 ? 'text-slate-900' : 'text-slate-400'}'>On the way</span>
+                    </div>
+
+                    <div class='flex flex-col items-center space-y-1.5'>
+                      <div class='w-9 h-9 rounded-full flex items-center justify-center transition-all ${currentStepIdx >= 3 ? 'bg-brand-500 text-white ring-4 ring-brand-100 shadow-md' : 'bg-slate-100 text-slate-400 border border-slate-200'}'>
+                        <i data-lucide='check-circle-2' class='w-4 h-4'></i>
+                      </div>
+                      <span class='text-[9px] font-black ${currentStepIdx >= 3 ? 'text-slate-900' : 'text-slate-400'}'>Delivered</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Footer Info Row (OTP & Directions) -->
+                <div class='pt-2 border-t border-slate-100 flex items-center justify-between'>
+                  <div class='flex items-center space-x-1.5'>
+                    <span class='text-[10px] font-black text-slate-400 uppercase'>DELIVERY OTP:</span>
+                    <span class='px-2.5 py-1 rounded-xl bg-brand-50 border border-brand-200 text-brand-800 text-xs font-black font-mono'>
+                      ${order.otp || '1234'}
+                    </span>
+                  </div>
+
+                  <button onclick='app.openDirections(${shopLat}, ${shopLng})' class='px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-extrabold flex items-center space-x-1 transition'>
+                    <i data-lucide='navigation' class='w-3.5 h-3.5 text-brand-600'></i>
+                    <span>Directions</span>
+                  </button>
+                </div>
+
+              </div>
+            </div>
+
+
+
+
+
+          </div>
+        `;
+
+        setTimeout(() => {
+          if (state.trackingMapInstance) state.trackingMapInstance.remove();
+          state.driverMarker = null;
+
+          state.trackingMapInstance = L.map('tracking-map', { zoomControl: false }).setView([userLat, userLng], 14);
+          
+          // Module E: CartoDB Voyager Raster Tiles
+          L.tileLayer(CARTO_TILE_URL, { maxZoom: 19, subdomains: 'abcd', attribution: CARTO_ATTRIBUTION }).addTo(state.trackingMapInstance);
+
+          // Custom DivIcons
+          const userIcon = L.divIcon({
+            className: 'custom-leaflet-pin',
+            html: `<div class="w-8 h-8 rounded-full bg-brand-600 text-white flex items-center justify-center shadow-lg border-2 border-white"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 00-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg></div>`,
+            iconSize: [32, 32],
+            iconAnchor: [16, 16]
+          });
+
+          const shopIcon = L.divIcon({
+            className: 'custom-leaflet-pin',
+            html: `<div class="w-8 h-8 rounded-full bg-slate-900 text-white flex items-center justify-center shadow-lg border-2 border-white"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z"/></svg></div>`,
+            iconSize: [32, 32],
+            iconAnchor: [16, 16]
+          });
+
+          L.marker([userLat, userLng], { icon: userIcon }).addTo(state.trackingMapInstance).bindPopup("Delivery Address");
+          L.marker([shopLat, shopLng], { icon: shopIcon }).addTo(state.trackingMapInstance).bindPopup("BazaarKart Store");
+
+          const line = L.polyline([[userLat, userLng], [shopLat, shopLng]], { color: '#16a34a', weight: 4, opacity: 0.8, dashArray: '6, 6' }).addTo(state.trackingMapInstance);
+          state.trackingMapInstance.fitBounds(line.getBounds(), { padding: [30, 30] });
+
+          // Module B: Listen for real-time driver GPS coordinates (orders/{orderId}/driverLocation)
+          // NOTE: A future driver/shop patch on ShopOwnerBK.html will broadcast driverLocation coordinates to RTDB.
+          const driverLocRef = ref(db, 'orders/' + orderId + '/driverLocation');
+          const driverKey = 'driver_loc_' + orderId;
+          if (state.activeListeners[driverKey]) { try { off(state.activeListeners[driverKey]); } catch(e) {} }
+          state.activeListeners[driverKey] = driverLocRef;
+          onValue(driverLocRef, (snap) => {
+            const dData = snap.val();
+            if (dData && dData.lat && dData.lng && state.trackingMapInstance) {
+              const dLatLng = [dData.lat, dData.lng];
+              if (!state.driverMarker) {
+                const driverIcon = L.divIcon({
+                  className: 'custom-leaflet-pin',
+                  html: '<div class="w-8 h-8 rounded-full bg-amber-500 text-slate-950 flex items-center justify-center shadow-lg border-2 border-white"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg></div>',
+                  iconSize: [32, 32],
+                  iconAnchor: [16, 16]
+                });
+                state.driverMarker = L.marker(dLatLng, { icon: driverIcon }).addTo(state.trackingMapInstance).bindPopup('Delivery Partner');
+              } else {
+                state.driverMarker.setLatLng(dLatLng);
+              }
+            }
+          });
+        }, 200);
+      }
+
+      openChat(shopId) {
+        const chatRoomId = `${state.user ? state.user.uid : 'guest'}_${shopId}`;
+        this.navigateTo('chat', { chatRoomId });
+      }
+
+      // 13. CHAT VIEW
+      renderChatRoom(chatRoomId, isSoft = false) {
+        state.activeChatRoomId = chatRoomId;
+        const container = document.getElementById('app-content');
+
+        container.innerHTML = `
+          <div class="flex flex-col h-[78vh] ${isSoft ? '' : 'fade-in'}">
+            <div class="flex items-center space-x-2 border-b border-slate-200 pb-2 mb-2">
+              <button onclick="app.navigateTo('orders')" class="p-1.5 rounded-xl bg-slate-200">
+                <i data-lucide="arrow-left" class="w-4 h-4"></i>
+              </button>
+              <h3 class="text-xs font-black text-slate-900">Chat with Partner Merchant</h3>
+            </div>
+
+            <div id="messages-list" class="flex-1 overflow-y-auto custom-scrollbar space-y-2 p-1">
+              <div class="text-center py-10 text-slate-400 text-xs font-bold">No messages yet. Say Hello!</div>
+            </div>
+
+            <form onsubmit="app.sendMessage(event)" class="pt-2 border-t border-slate-200 flex items-center space-x-2">
+              <input type="text" id="chat-input" placeholder="Type message..." required
+                class="flex-1 bg-white border border-slate-200 rounded-2xl py-3 px-4 text-xs font-bold focus:outline-none focus:border-brand-600">
+              <button type="submit" class="px-5 py-3 rounded-2xl bg-brand-600 text-white font-black text-xs shadow-md">
+                SEND
+              </button>
+            </form>
+          </div>
+        `;
+
+        const key = `chat_${chatRoomId}`;
+        if (state.activeListeners[key]) {
+          try { off(state.activeListeners[key]); } catch(e) {}
+        }
+
+        const msgRef = ref(db, `messages/${chatRoomId}`);
+        state.activeListeners[key] = msgRef;
+
+        onValue(msgRef, (snap) => {
+          const raw = snap.val() || {};
+          const list = Object.keys(raw).map(id => ({ id, ...raw[id] })).sort((a,b) => a.createdAt - b.createdAt);
+          const box = document.getElementById('messages-list');
+          if (box) {
+            box.innerHTML = list.length === 0 ? `<div class="text-center text-xs text-slate-400 font-bold py-10">No messages yet</div>` : list.map(m => `
+              <div class="flex flex-col ${m.senderId === (state.user ? state.user.uid : 'guest') ? 'items-end' : 'items-start'}">
+                <div class="max-w-[80%] p-3 rounded-2xl text-xs font-bold ${m.senderId === (state.user ? state.user.uid : 'guest') ? 'bg-brand-600 text-white rounded-tr-none' : 'bg-slate-200 text-slate-800 rounded-tl-none'}">
+                  ${utils.escapeHTML(m.text)}
+                </div>
+              </div>
+            `).join('');
+            box.scrollTop = box.scrollHeight;
+          }
+        });
+      }
+
+      async sendMessage(e) {
+        e.preventDefault();
+        const input = document.getElementById('chat-input');
+        const text = input.value.trim();
+        if (!text || !state.activeChatRoomId) return;
+
+        input.value = '';
+        await push(ref(db, `messages/${state.activeChatRoomId}`), {
+          senderId: state.user ? state.user.uid : 'guest',
+          text: text,
+          createdAt: Date.now()
+        });
+      }
+
+      // 14. SHOPS & MENU TAB
+      renderCategories(isSoft = false) {
+        const container = document.getElementById('app-content');
+        container.innerHTML = `
+          <div class="space-y-5 ${isSoft ? '' : 'fade-in'}">
+            
+            <div class="space-y-2">
+              <div class="flex items-center justify-between px-1">
+                <h2 class="text-xs font-black text-slate-900 uppercase tracking-wider">Nearby Partner Shops</h2>
+                <span class="text-[10px] text-slate-400 font-extrabold">${state.nearbyShops.length} STORES AVAILABLE</span>
+              </div>
+
+              ${state.nearbyShops.length === 0 ? `
+                <div class="p-5 bg-white border border-slate-200 rounded-3xl text-center space-y-2">
+                  <i data-lucide="store" class="w-8 h-8 text-slate-300 mx-auto"></i>
+                  <p class="text-xs font-bold text-slate-500">No stores serving your currently selected area</p>
+                  <button onclick="app.navigateTo('location-selector')" class="text-xs font-black text-brand-600 underline">Change Delivery Address</button>
+                </div>
+              ` : `
+                <div class="space-y-2.5">
+                  ${state.nearbyShops.map(s => `
+                    <div onclick="app.navigateTo('shop-profile', { shopId: '${s.id}' })" class="p-3.5 bg-white border border-slate-200/80 rounded-2xl shadow-xs flex items-center justify-between cursor-pointer active:scale-98 transition">
+                      <div class="flex items-center space-x-3">
+                        <div class="w-11 h-11 rounded-2xl bg-brand-50 border border-brand-200 text-brand-700 flex items-center justify-center font-black">
+                          <i data-lucide="store" class="w-5 h-5"></i>
+                        </div>
+                        <div>
+                          <h3 class="text-xs font-black text-slate-900">${utils.escapeHTML(s.shopName)}</h3>
+                          <p class="text-[10px] text-slate-400 font-extrabold">Owner: ${utils.escapeHTML(s.ownerName || 'Merchant')}</p>
+                          <div class="flex items-center space-x-2 text-[10px] font-extrabold text-slate-500 mt-0.5">
+                            <span class="flex items-center text-amber-500"><i data-lucide="star" class="w-3 h-3 fill-amber-400 mr-0.5"></i> ${s.rating || 4.9}</span>
+                            <span>•</span>
+                            <span>${s.distanceKm ? s.distanceKm.toFixed(1) + ' KM' : '0.8 KM'}</span>
+                            <span>•</span>
+                            <span class="text-brand-700 font-black">${s.deliveryTimeMins || '30 Mins'}</span>
+                          </div>
+                        </div>
+                      </div>
+                      <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+                    </div>
+                  `).join('')}
+                </div>
+              `}
+            </div>
+
+          </div>
+        `;
+      }
+
+      filterCategoryAndGo(c) {
+        state.activeCategory = c;
+        this.navigateTo('home');
+      }
+
+      // 15. WISHLIST VIEW
+      renderWishlist(isSoft = false) {
+        const container = document.getElementById('app-content');
+        const wishProducts = state.products.filter(p => state.wishlist.includes(p.id));
+
+        container.innerHTML = `
+          <div class="space-y-4 ${isSoft ? '' : 'fade-in'}">
+            <h2 class="text-sm font-black text-slate-900 uppercase tracking-wider">Your Wishlist</h2>
+            <div class="grid grid-cols-2 gap-2.5">
+              ${wishProducts.length === 0 ? `
+                <div class="col-span-2 text-center py-16 text-slate-400 text-xs font-black">No saved wishlist items</div>
+              ` : wishProducts.map(p => this.renderProductCard(p)).join('')}
+            </div>
+          </div>
+        `;
+      }
+
+      // 16. EXPANDED PROFILE VIEW & SHOP PARTNER FLOW
+      renderProfile(isSoft = false) {
+        const container = document.getElementById('app-content');
+        container.innerHTML = `
+          <div class="space-y-4 ${isSoft ? '' : 'fade-in'}">
+            <!-- Card 1: User Account Header -->
+            <div class="p-5 bg-white border border-slate-200/80 rounded-3xl text-center space-y-2 shadow-xs relative">
+              <div class="w-16 h-16 rounded-3xl bg-brand-600 text-white font-black text-2xl flex items-center justify-center mx-auto shadow-lg shadow-brand-600/25 ring-2 ring-brand-100">
+                ${(state.user?.name || 'U')[0]}
+              </div>
+              <div>
+                <h3 class="text-sm font-black text-slate-900">${utils.escapeHTML(state.user?.name || 'Customer')}</h3>
+                <p class="text-xs text-slate-500 font-bold">${state.user?.phone || 'Mobile phone unverified'}</p>
+              </div>
+            </div>
+
+            <!-- Card 2: Quick Account Actions -->
+            <div class="bg-white border border-slate-200/80 rounded-3xl overflow-hidden divide-y divide-slate-100 shadow-xs">
+              <div onclick="app.navigateTo('edit-profile')" class="p-3.5 flex items-center justify-between cursor-pointer hover:bg-slate-50 active:scale-98 transition">
+                <div class="flex items-center space-x-3">
+                  <div class="w-9 h-9 rounded-xl bg-brand-50 text-brand-600 flex items-center justify-center">
+                    <i data-lucide="user-cog" class="w-4 h-4"></i>
+                  </div>
+                  <div>
+                    <h4 class="text-xs font-black text-slate-900">Edit Profile</h4>
+                    <p class="text-[10px] text-slate-400 font-bold">Update name and phone number</p>
+                  </div>
+                </div>
+                <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+              </div>
+
+              <div onclick="app.navigateTo('orders')" class="p-3.5 flex items-center justify-between cursor-pointer hover:bg-slate-50 active:scale-98 transition">
+                <div class="flex items-center space-x-3">
+                  <div class="w-9 h-9 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center">
+                    <i data-lucide="shopping-bag" class="w-4 h-4"></i>
+                  </div>
+                  <div>
+                    <h4 class="text-xs font-black text-slate-900">Order History</h4>
+                    <p class="text-[10px] text-slate-400 font-bold">View past deliveries and re-order</p>
+                  </div>
+                </div>
+                <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+              </div>
+
+              <div onclick="app.navigateTo('wishlist')" class="p-3.5 flex items-center justify-between cursor-pointer hover:bg-slate-50 active:scale-98 transition">
+                <div class="flex items-center space-x-3">
+                  <div class="w-9 h-9 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center">
+                    <i data-lucide="heart" class="w-4 h-4"></i>
+                  </div>
+                  <div>
+                    <h4 class="text-xs font-black text-slate-900">Saved Wishlist</h4>
+                    <p class="text-[10px] text-slate-400 font-bold">Your favorite grocery items</p>
+                  </div>
+                </div>
+                <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+              </div>
+
+              <!-- BECOME A SHOP PARTNER ENTRY ROW -->
+              <div onclick="app.navigateTo('shop-partner-apply')" class="p-3.5 flex items-center justify-between cursor-pointer hover:bg-emerald-50/50 active:scale-98 transition bg-emerald-50/20">
+                <div class="flex items-center space-x-3">
+                  <div class="w-9 h-9 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center">
+                    <i data-lucide="store" class="w-4 h-4"></i>
+                  </div>
+                  <div>
+                    <h4 class="text-xs font-black text-slate-900">Become a Shop Partner</h4>
+                    <p class="text-[10px] text-emerald-700 font-bold">List your store on BazaarKart</p>
+                  </div>
+                </div>
+                <i data-lucide="chevron-right" class="w-4 h-4 text-emerald-600"></i>
+              </div>
+            </div>
+
+            <!-- Card 3: Saved Delivery Addresses -->
+            <div class="bg-white border border-slate-200/80 rounded-3xl p-4 space-y-3 shadow-xs">
+              <div class="flex items-center justify-between">
+                <h4 class="text-xs font-black text-slate-900 uppercase tracking-wider">Saved Addresses</h4>
+                <button onclick="app.navigateTo('add-address')" class="text-xs font-black text-brand-600 flex items-center space-x-1">
+                  <i data-lucide="plus" class="w-3.5 h-3.5"></i>
+                  <span>Add New</span>
+                </button>
+              </div>
+
+              <div class="space-y-2">
+                ${state.savedAddresses.length === 0 ? `
+                  <div class="p-4 bg-slate-50 border border-slate-200 rounded-2xl text-center text-xs text-slate-400 font-bold">
+                    No saved addresses
+                  </div>
+                ` : state.savedAddresses.map(a => `
+                  <div class="p-3 bg-slate-50 border border-slate-200/80 rounded-2xl flex items-center justify-between shadow-xs">
+                    <div class="flex items-center space-x-3 min-w-0 flex-1 pr-2">
+                      <div class="w-8 h-8 rounded-xl ${a.type === 'HOME' ? 'bg-blue-50 text-blue-600' : 'bg-purple-50 text-purple-600'} flex items-center justify-center font-black text-xs">
+                        <i data-lucide="${a.type === 'HOME' ? 'home' : 'building'}" class="w-4 h-4"></i>
+                      </div>
+                      <div class="min-w-0">
+                        <div class="flex items-center space-x-1">
+                          <span class="text-xs font-black text-slate-900 block">${a.type}</span>
+                          ${a.isDefault ? `<span class="px-1.5 py-0.2 bg-brand-100 text-brand-800 text-[8px] font-black rounded">DEFAULT</span>` : ''}
+                        </div>
+                        <p class="text-[10px] text-slate-500 font-medium truncate max-w-[170px]">${utils.escapeHTML(a.address)}</p>
+                      </div>
+                    </div>
+
+                    <div class="flex items-center space-x-1">
+                      <button onclick="app.navigateTo('add-address', { addressId: '${a.id}' })" class="p-1.5 rounded-lg text-slate-400 hover:text-slate-700">
+                        <i data-lucide="pencil" class="w-3.5 h-3.5"></i>
+                      </button>
+                      
+                      ${state.confirmDeleteAddressId === a.id ? `
+                        <button onclick="app.deleteAddress('${a.id}')" class="px-2 py-1 rounded-lg bg-rose-500 text-white font-extrabold text-[9px]">
+                          CONFIRM
+                        </button>
+                      ` : `
+                        <button onclick="app.confirmDeleteAddressPrompt('${a.id}')" class="p-1.5 rounded-lg text-slate-400 hover:text-rose-500">
+                          <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                        </button>
+                      `}
+                    </div>
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+
+            <!-- Danger Zone Action -->
+            <button onclick="app.logout()" class="w-full p-3.5 bg-rose-50 text-rose-600 border border-rose-200 font-black rounded-2xl text-xs flex items-center justify-center space-x-2 active:scale-98 transition shadow-xs">
+              <i data-lucide="log-out" class="w-4 h-4"></i>
+              <span>LOGOUT ACCOUNT</span>
+            </button>
+          </div>
+        `;
+      }
+
+      // SHOP PARTNER APPLICATION FORM (MODULE B ICON HYDRATION FIX)
+      async renderShopPartnerForm(isSoft = false) {
+        const container = document.getElementById('app-content');
+
+        if (state.user && !isSoft) {
+          try {
+            const appQuery = query(ref(db, 'shopApplications'), orderByChild('applicantUserId'), equalTo(state.user.uid));
+            const snap = await get(appQuery);
+            if (snap.exists()) {
+              const raw = snap.val();
+              const appId = Object.keys(raw)[0];
+              state.myShopApplication = { id: appId, ...raw[appId] };
+            } else {
+              state.myShopApplication = null;
+            }
+          } catch(e) {}
+        }
+
+        if (!state.partnerForm.ownerName && state.user) state.partnerForm.ownerName = state.user.name || '';
+        if (!state.partnerForm.phone && state.user) state.partnerForm.phone = (state.user.phone || '').replace('+91 ', '');
+        if (!state.partnerForm.fullAddress && state.selectedAddress) {
+          state.partnerForm.fullAddress = state.selectedAddress.address || '';
+          state.partnerForm.lat = state.selectedAddress.lat;
+          state.partnerForm.lng = state.selectedAddress.lng;
+        }
+
+        if (state.myShopApplication) {
+          const app = state.myShopApplication;
+          const statusColors = {
+            pending: 'bg-amber-100 text-amber-800 border-amber-300',
+            approved: 'bg-emerald-100 text-emerald-800 border-emerald-300',
+            rejected: 'bg-rose-100 text-rose-800 border-rose-300'
+          };
+
+          container.innerHTML = `
+            <div class="space-y-4 ${isSoft ? '' : 'fade-in'}">
+              <div class="flex items-center space-x-2">
+                <button onclick="app.navigateTo('profile')" class="p-2 rounded-xl bg-white border border-slate-200 text-slate-700">
+                  <i data-lucide="arrow-left" class="w-4 h-4"></i>
+                </button>
+                <h2 class="text-sm font-black text-slate-900 uppercase tracking-wider">Partner Application Status</h2>
+              </div>
+
+              <div class="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-xs text-center space-y-4">
+                <div class="w-16 h-16 bg-brand-50 text-brand-600 rounded-3xl flex items-center justify-center mx-auto border border-brand-200">
+                  <i data-lucide="check-circle-2" class="w-8 h-8"></i>
+                </div>
+
+                <div class="space-y-1">
+                  <span class="px-3 py-1 rounded-full text-xs font-black uppercase border ${statusColors[app.status] || 'bg-slate-100 text-slate-700'}">
+                    STATUS: ${(app.status || 'pending').toUpperCase()}
+                  </span>
+                  <h3 class="text-base font-black text-slate-900 pt-2">${utils.escapeHTML(app.shopName)}</h3>
+                  <p class="text-xs text-slate-500 font-medium">Applied on ${utils.formatDate(app.createdAt)}</p>
+                </div>
+
+                <div class="p-4 bg-slate-50 rounded-2xl text-left space-y-2 text-xs font-semibold text-slate-700">
+                  <div class="flex justify-between"><span>Owner Name:</span><span class="font-bold text-slate-900">${utils.escapeHTML(app.ownerName)}</span></div>
+                  <div class="flex justify-between"><span>WhatsApp Phone:</span><span class="font-bold text-slate-900">+91 ${utils.escapeHTML(app.phone)}</span></div>
+                  <div class="flex justify-between"><span>Category:</span><span class="font-bold text-slate-900">${utils.escapeHTML(app.category)}</span></div>
+                  <div class="flex justify-between"><span>Location:</span><span class="font-bold text-slate-900 truncate max-w-[150px]">${utils.escapeHTML(app.fullAddress)}</span></div>
+                </div>
+
+                <p class="text-xs text-slate-600 leading-relaxed font-medium">
+                  Our onboarding team will review your application and reach out to you on WhatsApp within 24-48 hours.
+                </p>
+
+                <button onclick="app.navigateTo('profile')" class="w-full bg-brand-600 text-white font-black py-3.5 rounded-2xl text-xs shadow-md">
+                  BACK TO PROFILE
+                </button>
+              </div>
+            </div>
+          `;
+          lucide.createIcons();
+          return;
+        }
+
+        const categories = ['Grocery', 'Organic', 'Fruits & Veggies', 'Dairy & Bakery', 'Snacks & Beverages', 'Pharmacy', 'Others'];
+        const form = state.partnerForm;
+
+        const phoneDigits = (form.phone || '').replace(/\D/g, '');
+        const isValid = form.shopName.length >= 2 && 
+                        form.ownerName.length >= 2 && 
+                        phoneDigits.length === 10 && 
+                        form.category && 
+                        form.fullAddress.length >= 5;
+
+        container.innerHTML = `
+          <div class="space-y-4 ${isSoft ? '' : 'fade-in'}">
+            <div class="flex items-center space-x-2">
+              <button onclick="app.navigateTo('profile')" class="p-2 rounded-xl bg-white border border-slate-200 text-slate-700">
+                <i data-lucide="arrow-left" class="w-4 h-4"></i>
+              </button>
+              <h2 class="text-sm font-black text-slate-900 uppercase tracking-wider">Become a Shop Partner</h2>
+            </div>
+
+            <form onsubmit="app.submitShopApplication(event)" class="bg-white p-5 rounded-3xl border border-slate-200/80 shadow-xs space-y-4">
+              
+              <div>
+                <label class="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1">Shop / Store Name *</label>
+                <input type="text" id="pa-shop-name" value="${utils.escapeHTML(form.shopName)}" placeholder="e.g. Metro Supermart" required
+                  oninput="app.updatePartnerFormField('shopName', this.value)"
+                  class="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 px-4 text-xs font-bold text-slate-900 focus:outline-none focus:border-brand-600">
+              </div>
+
+              <div>
+                <label class="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1">Owner Name *</label>
+                <input type="text" id="pa-owner-name" value="${utils.escapeHTML(form.ownerName)}" placeholder="Your Full Name" required
+                  oninput="app.updatePartnerFormField('ownerName', this.value)"
+                  class="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 px-4 text-xs font-bold text-slate-900 focus:outline-none focus:border-brand-600">
+              </div>
+
+              <div>
+                <label class="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1">WhatsApp Mobile Number *</label>
+                <div class="relative">
+                  <span class="absolute inset-y-0 left-0 flex items-center pl-4 text-xs font-black text-slate-500">+91</span>
+                  <input type="tel" id="pa-phone" value="${utils.escapeHTML(form.phone)}" placeholder="9876543210" required maxlength="10"
+                    oninput="app.updatePartnerFormField('phone', this.value)"
+                    class="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 pl-14 pr-4 text-xs font-bold text-slate-900 focus:outline-none focus:border-brand-600">
+                </div>
+                <span class="text-[9px] text-slate-500 font-bold block mt-1">We'll reach out to this number on WhatsApp after review</span>
+              </div>
+
+              <div>
+                <label class="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1.5">Primary Category *</label>
+                <div class="flex flex-wrap gap-1.5">
+                  ${categories.map(c => `
+                    <button type="button" onclick="app.selectPartnerCategory('${c}')"
+                      class="px-3 py-1.5 rounded-xl text-xs font-black transition ${form.category === c ? 'bg-brand-600 text-white shadow-xs' : 'bg-slate-100 text-slate-600 hover:text-slate-900'}">
+                      ${c}
+                    </button>
+                  `).join('')}
+                </div>
+              </div>
+
+              <div>
+                <label class="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1">Store Address & GPS *</label>
+                <button type="button" onclick="app.navigateTo('location-search')" class="w-full p-3 bg-slate-50 border border-slate-200 rounded-2xl text-left flex items-center justify-between">
+                  <div class="min-w-0 flex-1 pr-2">
+                    <span class="text-xs font-bold text-slate-900 block truncate">${form.fullAddress ? utils.escapeHTML(form.fullAddress) : 'Select Store Location'}</span>
+                    <span class="text-[9px] text-brand-700 font-black">${form.lat ? 'GPS Location Set ✓' : 'Tap to pick location on map'}</span>
+                  </div>
+                  <i data-lucide="map-pin" class="w-4 h-4 text-brand-600 flex-shrink-0"></i>
+                </button>
+              </div>
+
+              <div>
+                <label class="block text-xs font-extrabold text-slate-700 uppercase tracking-wider mb-1">Shop Description (Optional)</label>
+                <textarea id="pa-desc" rows="2" placeholder="Brief details about items sold, business age..."
+                  oninput="app.updatePartnerFormField('description', this.value)"
+                  class="w-full bg-slate-50 border border-slate-200 rounded-2xl py-3 px-4 text-xs font-bold text-slate-900 focus:outline-none focus:border-brand-600">${utils.escapeHTML(form.description)}</textarea>
+              </div>
+
+              <div class="p-3 bg-slate-50 rounded-2xl space-y-1 text-[10px] font-bold">
+                <div class="${form.shopName.length >= 2 ? 'text-emerald-600' : 'text-slate-400'}">✓ Valid Shop Name</div>
+                <div class="${form.ownerName.length >= 2 ? 'text-emerald-600' : 'text-slate-400'}">✓ Valid Owner Name</div>
+                <div class="${phoneDigits.length === 10 ? 'text-emerald-600' : 'text-slate-400'}">✓ 10-Digit Mobile Number</div>
+                <div class="${form.fullAddress.length >= 5 ? 'text-emerald-600' : 'text-slate-400'}">✓ Store Location Selected</div>
+              </div>
+
+              <button type="submit" ${!isValid ? 'disabled' : ''} 
+                class="w-full bg-brand-600 hover:bg-brand-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-black py-4 rounded-2xl shadow-lg shadow-brand-600/25 text-xs tracking-wider transition active:scale-98">
+                SUBMIT PARTNER APPLICATION
+              </button>
+            </form>
+          </div>
+        `;
+        lucide.createIcons();
+      }
+
+      updatePartnerFormField(field, val) {
+        state.partnerForm[field] = val;
+        this.renderShopPartnerForm(true);
+      }
+
+      selectPartnerCategory(cat) {
+        state.partnerForm.category = cat;
+        this.renderShopPartnerForm(true);
+      }
+
+      async submitShopApplication(e) {
+        e.preventDefault();
+        const form = state.partnerForm;
+        const phoneDigits = (form.phone || '').replace(/\D/g, '');
+
+        if (!state.user) {
+          utils.toast("Sign in required to submit application", "error");
+          return;
+        }
+
+        if (form.shopName.length < 2 || form.ownerName.length < 2 || phoneDigits.length !== 10 || !form.fullAddress) {
+          utils.toast("Please complete all required fields correctly", "error");
+          return;
+        }
+
+        try {
+          const appRef = push(ref(db, 'shopApplications'));
+          await set(appRef, {
+            applicantUserId: state.user.uid,
+            shopName: form.shopName,
+            ownerName: form.ownerName,
+            phone: phoneDigits,
+            category: form.category,
+            fullAddress: form.fullAddress,
+            lat: form.lat || 28.6139,
+            lng: form.lng || 77.2090,
+            description: form.description || '',
+            status: 'pending',
+            createdAt: Date.now()
+          });
+
+          state.myShopApplication = {
+            id: appRef.key,
+            shopName: form.shopName,
+            ownerName: form.ownerName,
+            phone: phoneDigits,
+            category: form.category,
+            fullAddress: form.fullAddress,
+            status: 'pending',
+            createdAt: Date.now()
+          };
+
+          utils.toast("Application submitted successfully!", "success");
+          this.renderShopPartnerForm(true);
+        } catch(err) {
+          utils.toast("Submission failed: " + err.message, "error");
+        }
+      }
+
+      logout() {
+        localStorage.removeItem('bk_customer_uid');
+        state.user = null;
+        signOut(auth);
+        this.navigateTo('auth');
+      }
+
+      closeBottomSheet() {
+        document.getElementById('bottom-sheet-backdrop').classList.add('hidden');
+      }
+    }
+
+    // Initialize App Instance
+    window.app = new BazaarKartCustomerApp();
+    window.addEventListener('load', () => { if (window.utils) utils.hydrateIcons(); });
+    setInterval(() => { if (window.utils) utils.hydrateIcons(); }, 1000);
+  </script>
+</body>
+</html>
