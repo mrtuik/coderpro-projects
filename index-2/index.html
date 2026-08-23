@@ -1,0 +1,1415 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Clippi — Transcript-first AI video editor</title>
+<meta name="description" content="Clippi turns a natural-language instruction into a real editable cut. Upload a video, get a timestamped transcript, edit by text or by chat, export locally." />
+<meta property="og:title" content="Clippi — Transcript-first AI video editor" />
+<meta property="og:description" content="Upload a video, get a timestamped transcript, describe your edit, compare two AI cuts, export in-browser." />
+<meta property="og:type" content="website" />
+<meta name="twitter:card" content="summary_large_image" />
+<link rel="icon" href="/favicon.ico" type="image/x-icon" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>
+  :root { color-scheme: light; }
+  html, body { height: 100%; }
+  body { background:#f7f7f6; color:#1c1c1a; -webkit-font-smoothing:antialiased; }
+  ::-webkit-scrollbar { width:8px; height:8px }
+  ::-webkit-scrollbar-thumb { background:#d8d8d4; border-radius:8px }
+  [data-lucide] { width:1em; height:1em }
+  .seg-active { background:#eef3ff; border-color:#c7d6ff }
+  mark { background:#fde68a; color:inherit; border-radius:2px }
+</style>
+</head>
+<body class="h-full">
+<div id="app" class="min-h-full"></div>
+
+<script type="module">
+import { FFmpeg } from "https://esm.sh/@ffmpeg/ffmpeg@0.12.10";
+import { toBlobURL } from "https://esm.sh/@ffmpeg/util@0.12.1";
+
+/* ============================ UTIL ============================ */
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "id-" + Math.random().toString(36).slice(2) + Date.now());
+const now = () => Date.now();
+const fmt = (s) => {
+  if (!isFinite(s) || s < 0) s = 0;
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
+  return (h ? String(h).padStart(2, "0") + ":" : "") + String(m).padStart(2, "0") + ":" + String(sec).padStart(2, "0");
+};
+const bytes = (n) => {
+  if (!n && n !== 0) return "—";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0; let v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return v.toFixed(v < 10 && i > 0 ? 1 : 0) + " " + u[i];
+};
+const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+
+function el(tag, props = {}, children = []) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === "class") n.className = v;
+    else if (k === "text") n.textContent = v;
+    else if (k === "html") throw new Error("html not allowed");
+    else if (k.startsWith("on") && typeof v === "function") n.addEventListener(k.slice(2).toLowerCase(), v);
+    else if (k === "value") n.value = v;
+    else if (k === "checked") n.checked = !!v;
+    else n.setAttribute(k, v === true ? "" : String(v));
+  }
+  for (const c of [].concat(children)) {
+    if (c === null || c === undefined || c === false) continue;
+    n.appendChild(typeof c === "string" || typeof c === "number" ? document.createTextNode(String(c)) : c);
+  }
+  return n;
+}
+const icon = (name, cls = "") => el("i", { "data-lucide": name, class: cls });
+function refreshIcons() { try { window.lucide && window.lucide.createIcons(); } catch (e) { /* icons optional */ } }
+
+const btn = (label, opts = {}) => {
+  const kind = opts.kind || "ghost";
+  const map = {
+    primary: "bg-neutral-900 text-white border-neutral-900 hover:bg-neutral-800",
+    ghost: "bg-white text-neutral-800 border-neutral-200 hover:bg-neutral-50",
+    danger: "bg-white text-red-600 border-red-200 hover:bg-red-50",
+    subtle: "bg-neutral-100 text-neutral-700 border-transparent hover:bg-neutral-200",
+  };
+  const b = el("button", {
+    type: "button",
+    class: `inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-sm font-medium shadow-sm transition disabled:opacity-40 disabled:cursor-not-allowed ${map[kind]} ${opts.class || ""}`,
+    onclick: opts.onclick, title: opts.title, disabled: opts.disabled,
+  }, [opts.icon ? icon(opts.icon) : null, label ? el("span", { text: label }) : null]);
+  return b;
+};
+
+/* ============================ STORAGE MODULE ============================ */
+const DB_NAME = "ClippiDB", DB_VERSION = 1;
+const STORES = {
+  projects: { key: "id", idx: [["updatedAt", "updatedAt"], ["status", "status"]] },
+  videoAssets: { key: "id", idx: [["projectId", "projectId"]] },
+  transcriptSegments: { key: "id", idx: [["projectId", "projectId"], ["videoAssetId", "videoAssetId"]] },
+  editVersions: { key: "id", idx: [["projectId", "projectId"]] },
+  editSegments: { key: "id", idx: [["editVersionId", "editVersionId"]] },
+  chatMessages: { key: "id", idx: [["projectId", "projectId"]] },
+  editHistory: { key: "id", idx: [["projectId", "projectId"]] },
+  appSettings: { key: "key", idx: [] },
+};
+
+let _db = null;
+function openDB() {
+  if (_db) return Promise.resolve(_db);
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      for (const [name, cfg] of Object.entries(STORES)) {
+        const store = db.objectStoreNames.contains(name) ? req.transaction.objectStore(name) : db.createObjectStore(name, { keyPath: cfg.key });
+        for (const [iname, path] of cfg.idx) if (!store.indexNames.contains(iname)) store.createIndex(iname, path);
+      }
+    };
+    req.onsuccess = () => { _db = req.result; _db.onversionchange = () => _db.close(); resolve(_db); };
+    req.onerror = () => reject(dbErr(req.error));
+  });
+}
+function dbErr(e) {
+  const name = (e && e.name) || "";
+  if (name === "QuotaExceededError") return new Error("Storage limit reached. Delete an old project to free space, then retry.");
+  return new Error("Local database error: " + (e && e.message ? e.message : "unknown") + ".");
+}
+function tx(stores, mode) { return openDB().then((db) => db.transaction(stores, mode)); }
+function wrap(req) { return new Promise((res, rej) => { req.onsuccess = () => res(req.result); req.onerror = () => rej(dbErr(req.error)); }); }
+
+async function addRecord(store, rec) { const t = await tx([store], "readwrite"); await wrap(t.objectStore(store).put(rec)); return rec; }
+async function updateRecord(store, rec) { return addRecord(store, rec); }
+async function getRecord(store, key) { const t = await tx([store], "readonly"); return wrap(t.objectStore(store).get(key)); }
+async function getAll(store) { const t = await tx([store], "readonly"); return wrap(t.objectStore(store).getAll()); }
+async function getAllByIndex(store, index, value) {
+  const t = await tx([store], "readonly");
+  return wrap(t.objectStore(store).index(index).getAll(value));
+}
+async function deleteRecord(store, key) { const t = await tx([store], "readwrite"); return wrap(t.objectStore(store).delete(key)); }
+function runTransaction(stores, fn) {
+  return openDB().then((db) => new Promise((resolve, reject) => {
+    const t = db.transaction(stores, "readwrite");
+    let out;
+    t.oncomplete = () => resolve(out);
+    t.onerror = () => reject(dbErr(t.error));
+    t.onabort = () => reject(dbErr(t.error));
+    const api = {
+      put: (s, rec) => t.objectStore(s).put(rec),
+      del: (s, k) => t.objectStore(s).delete(k),
+      byIndex: (s, i, v) => wrap(t.objectStore(s).index(i).getAll(v)),
+    };
+    Promise.resolve(fn(api)).then((r) => { out = r; }).catch((e) => { try { t.abort(); } catch (_) {} reject(e); });
+  }));
+}
+
+/* ============================ STATE MANAGER ============================ */
+const State = {
+  data: {
+    screen: "home",
+    projects: [],
+    projectFilter: "all",
+    stats: { projects: 0, minutes: 0, storage: null },
+    currentProject: null,
+    currentVideoAsset: null,
+    transcript: [],
+    editVersions: [],
+    activeVersionId: null,
+    editSegmentsByVersion: {},
+    chatMessages: [],
+    selectedSegmentIds: [],
+    playback: { currentTime: 0, duration: 0, isPlaying: false },
+    processing: { stage: null, progress: 0, engine: null, message: "" },
+    exportState: { status: "idle", progress: 0, url: null },
+    settings: null,
+    history: { undoStack: [], redoStack: [] },
+    errors: {},
+    search: { q: "", matches: [], cursor: 0 },
+    ui: { renamingId: null, confirmDeleteId: null, confirmDeleteVersionId: null, compare: false, chatBusy: false, modelProgress: null },
+  },
+  subs: new Map(),
+  subscribe(keys, fn) { const id = uid(); this.subs.set(id, { keys, fn }); return id; },
+  set(patch) {
+    Object.assign(this.data, patch);
+    const keys = new Set(Object.keys(patch));
+    for (const { keys: k, fn } of this.subs.values()) if (k === "*" || k.some((x) => keys.has(x))) fn(this.data);
+    refreshIcons();
+  },
+};
+const S = () => State.data;
+
+/* ============================ EVENT BUS ============================ */
+const Bus = {
+  map: new Map(),
+  on(evt, fn) { if (!this.map.has(evt)) this.map.set(evt, []); this.map.get(evt).push(fn); },
+  async emit(evt, payload) {
+    const list = this.map.get(evt) || [];
+    for (const fn of list) { try { await fn(payload); } catch (e) { console.error(evt, e); toast(e.message || String(e), "error"); } }
+  },
+};
+
+/* ============================ TOASTS (inline, non-modal) ============================ */
+const toastHost = el("div", { class: "fixed bottom-4 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 w-[min(92vw,26rem)]" });
+document.body.appendChild(toastHost);
+function toast(msg, kind = "info") {
+  const colors = { info: "border-neutral-200 bg-white text-neutral-800", error: "border-red-200 bg-red-50 text-red-700", ok: "border-emerald-200 bg-emerald-50 text-emerald-800" };
+  const t = el("div", { class: `flex items-start gap-2 rounded-xl border px-3 py-2 text-sm shadow-sm ${colors[kind]}` }, [
+    icon(kind === "error" ? "alert-triangle" : kind === "ok" ? "check-circle-2" : "info", "mt-0.5 shrink-0"),
+    el("span", { class: "flex-1", text: msg }),
+  ]);
+  toastHost.appendChild(t); refreshIcons();
+  setTimeout(() => t.remove(), 6000);
+}
+
+/* ============================ SETTINGS ============================ */
+const DEFAULT_SETTINGS = {
+  key: "global", transcriptionEngine: "wasm", cloudProvider: null, cloudApiKey: "",
+  preferredModelSize: "base", theme: "light", llmProvider: "openai", llmApiKey: "", llmModel: "",
+};
+async function loadSettings() {
+  let s = await getRecord("appSettings", "global");
+  if (!s) { s = { ...DEFAULT_SETTINGS, transcriptionEngine: (await hasWebGPU()) ? "webgpu" : "wasm" }; await addRecord("appSettings", s); }
+  return { ...DEFAULT_SETTINGS, ...s };
+}
+async function hasWebGPU() {
+  try { if (!navigator.gpu) return false; const a = await navigator.gpu.requestAdapter(); return !!a; } catch (e) { return false; }
+}
+
+/* ============================ MEDIA MODULE (ffmpeg.wasm) ============================ */
+const Media = {
+  ff: null, loading: null, cancelled: false,
+  async load(onLog) {
+    if (this.ff) return this.ff;
+    if (this.loading) return this.loading;
+    this.loading = (async () => {
+      const base = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd";
+      const ff = new FFmpeg();
+      ff.on("log", ({ message }) => onLog && onLog(message));
+      await ff.load({
+        coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, "text/javascript"),
+        wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, "application/wasm"),
+      });
+      this.ff = ff; return ff;
+    })();
+    return this.loading;
+  },
+  async extractAudio(blob, onProgress) {
+    const ff = await this.load();
+    const prog = ({ progress }) => onProgress && onProgress(Math.max(0, Math.min(1, progress)));
+    ff.on("progress", prog);
+    try {
+      const inName = "in_" + uid().slice(0, 8);
+      await ff.writeFile(inName, new Uint8Array(await blob.arrayBuffer()));
+      await ff.exec(["-i", inName, "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", "out.wav"]);
+      const data = await ff.readFile("out.wav");
+      await ff.deleteFile(inName); await ff.deleteFile("out.wav");
+      return new Blob([data.buffer], { type: "audio/wav" });
+    } finally { ff.off("progress", prog); }
+  },
+  async renderCut(blob, ranges, onProgress) {
+    const ff = await this.load();
+    const prog = ({ progress }) => onProgress && onProgress(Math.max(0, Math.min(1, progress)));
+    ff.on("progress", prog);
+    try {
+      const inName = "src_" + uid().slice(0, 8) + ".mp4";
+      await ff.writeFile(inName, new Uint8Array(await blob.arrayBuffer()));
+      const parts = [];
+      ranges.forEach((r, i) => {
+        parts.push(`[0:v]trim=start=${r.start.toFixed(3)}:end=${r.end.toFixed(3)},setpts=PTS-STARTPTS[v${i}]`);
+        parts.push(`[0:a]atrim=start=${r.start.toFixed(3)}:end=${r.end.toFixed(3)},asetpts=PTS-STARTPTS[a${i}]`);
+      });
+      const concat = ranges.map((_, i) => `[v${i}][a${i}]`).join("") + `concat=n=${ranges.length}:v=1:a=1[vout][aout]`;
+      const filter = parts.join(";") + ";" + concat;
+      await ff.exec(["-i", inName, "-filter_complex", filter, "-map", "[vout]", "-map", "[aout]",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", "-c:a", "aac", "-movflags", "+faststart", "out.mp4"]);
+      const data = await ff.readFile("out.mp4");
+      await ff.deleteFile(inName); await ff.deleteFile("out.mp4");
+      return new Blob([data.buffer], { type: "video/mp4" });
+    } finally { ff.off("progress", prog); }
+  },
+  cancel() { try { this.ff && this.ff.terminate(); } catch (e) {} this.ff = null; this.loading = null; },
+};
+
+async function decodeToMono16k(wavBlob) {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC({ sampleRate: 16000 });
+  const buf = await ctx.decodeAudioData(await wavBlob.arrayBuffer());
+  const data = buf.getChannelData(0).slice();
+  ctx.close();
+  return data;
+}
+
+/* ============================ TRANSCRIPTION MODULE ============================ */
+let transformersMod = null;
+async function loadTransformers() {
+  if (!transformersMod) transformersMod = await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.1");
+  return transformersMod;
+}
+const MODEL_BY_SIZE = { tiny: "onnx-community/whisper-tiny.en", base: "onnx-community/whisper-base", small: "onnx-community/whisper-small" };
+const pipelineCache = new Map();
+
+class LocalWhisperEngine {
+  constructor(device, size) { this.device = device; this.size = size; this.name = device === "webgpu" ? "webgpu" : "wasm"; }
+  async getPipe(onProgress) {
+    const model = MODEL_BY_SIZE[this.size] || MODEL_BY_SIZE.base;
+    const cacheKey = this.device + "|" + model;
+    if (pipelineCache.has(cacheKey)) return pipelineCache.get(cacheKey);
+    const { pipeline, env } = await loadTransformers();
+    env.allowLocalModels = false;
+    env.useBrowserCache = true;
+    const p = await pipeline("automatic-speech-recognition", model, {
+      device: this.device,
+      dtype: this.device === "webgpu" ? { encoder_model: "fp16", decoder_model_merged: "q4" } : "q8",
+      progress_callback: (e) => {
+        if (e && e.status === "progress" && e.total) onProgress && onProgress(e.progress / 100, e.file);
+        if (e && e.status === "done") onProgress && onProgress(1, e.file);
+      },
+    });
+    pipelineCache.set(cacheKey, p);
+    return p;
+  }
+  async transcribe(audioBlob, hooks = {}) {
+    const pipe = await this.getPipe(hooks.onModel);
+    const audio = await decodeToMono16k(audioBlob);
+    hooks.onStage && hooks.onStage("Transcribing audio locally");
+    const out = await pipe(audio, { return_timestamps: true, chunk_length_s: 30, stride_length_s: 5 });
+    const chunks = (out && out.chunks) || [];
+    const segs = chunks.map((c) => ({
+      start: Number(c.timestamp && c.timestamp[0]) || 0,
+      end: Number(c.timestamp && c.timestamp[1]) || 0,
+      text: (c.text || "").trim(),
+    })).filter((s) => s.text);
+    if (!segs.length && out && out.text) segs.push({ start: 0, end: audio.length / 16000, text: out.text.trim() });
+    return normalizeSegs(segs, audio.length / 16000);
+  }
+}
+class CloudWhisperEngine {
+  constructor(provider, apiKey) { this.provider = provider; this.apiKey = apiKey; this.name = "cloud"; }
+  async transcribe(audioBlob, hooks = {}) {
+    hooks.onStage && hooks.onStage("Transcribing via " + this.provider);
+    const url = this.provider === "groq" ? "https://api.groq.com/openai/v1/audio/transcriptions" : "https://api.openai.com/v1/audio/transcriptions";
+    const model = this.provider === "groq" ? "whisper-large-v3" : "whisper-1";
+    const fd = new FormData();
+    fd.append("file", new File([audioBlob], "audio.wav", { type: "audio/wav" }));
+    fd.append("model", model);
+    fd.append("response_format", "verbose_json");
+    fd.append("timestamp_granularities[]", "segment");
+    const res = await withTimeout(fetch(url, { method: "POST", headers: { Authorization: "Bearer " + this.apiKey }, body: fd }), 180000);
+    if (!res.ok) throw new Error("Cloud transcription failed (" + res.status + "). Check your API key and try again.");
+    const json = await res.json();
+    const segs = (json.segments || []).map((s) => ({ start: Number(s.start) || 0, end: Number(s.end) || 0, text: String(s.text || "").trim() })).filter((s) => s.text);
+    if (!segs.length && json.text) segs.push({ start: 0, end: 0, text: String(json.text) });
+    return normalizeSegs(segs, 0);
+  }
+}
+function normalizeSegs(segs, dur) {
+  segs.sort((a, b) => a.start - b.start);
+  return segs.map((s, i) => {
+    let end = s.end;
+    if (!end || end <= s.start) end = segs[i + 1] ? segs[i + 1].start : (dur || s.start + 2);
+    return { start: +s.start.toFixed(3), end: +Math.max(end, s.start + 0.05).toFixed(3), text: s.text };
+  });
+}
+async function resolveEngine() {
+  const st = S().settings;
+  let choice = st.transcriptionEngine;
+  if (choice === "cloud") {
+    if (!st.cloudApiKey || !st.cloudProvider) throw new Error("Cloud transcription selected but no API key is saved. Open Settings to add one.");
+    return new CloudWhisperEngine(st.cloudProvider, st.cloudApiKey);
+  }
+  if (choice === "webgpu" && !(await hasWebGPU())) {
+    Bus.emit("engine:fallback");
+    toast("WebGPU is not available in this browser — falling back to the WASM engine.", "info");
+    choice = "wasm";
+  }
+  return new LocalWhisperEngine(choice === "webgpu" ? "webgpu" : "wasm", st.preferredModelSize);
+}
+
+function withTimeout(promise, ms) {
+  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error("Request timed out. Check your connection and retry.")), ms))]);
+}
+
+/* ============================ AI EDIT MODULE ============================ */
+const AI = {
+  cfg() {
+    const st = S().settings;
+    const provider = st.llmProvider || "openai";
+    const key = st.llmApiKey || (st.cloudProvider === provider ? st.cloudApiKey : "");
+    if (!key) throw new Error("No AI key saved. Add your OpenAI or Groq key in Settings to generate cuts.");
+    const url = provider === "groq" ? "https://api.groq.com/openai/v1/chat/completions" : "https://api.openai.com/v1/chat/completions";
+    const model = st.llmModel || (provider === "groq" ? "llama-3.3-70b-versatile" : "gpt-4o-mini");
+    return { url, key, model };
+  },
+  async chat(messages, jsonMode = true) {
+    const { url, key, model } = this.cfg();
+    const res = await withTimeout(fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + key },
+      body: JSON.stringify({ model, messages, temperature: 0.3, ...(jsonMode ? { response_format: { type: "json_object" } } : {}) }),
+    }), 120000);
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      throw new Error("AI request failed (" + res.status + "). " + (t ? t.slice(0, 160) : "Check your key and model."));
+    }
+    const json = await res.json();
+    const content = json && json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content;
+    if (!content) throw new Error("AI returned an empty response. Retry.");
+    return content;
+  },
+  parseJSON(raw) {
+    let text = String(raw).trim();
+    const fence = text.match(/```(?:json)?([\s\S]*?)```/);
+    if (fence) text = fence[1].trim();
+    const first = text.indexOf("{"), last = text.lastIndexOf("}");
+    if (first > 0 || last < text.length - 1) text = text.slice(first, last + 1);
+    try { return JSON.parse(text); } catch (e) { throw new Error("The AI response was not valid JSON. Retry the instruction."); }
+  },
+  // Hierarchical map for long transcripts
+  async buildStoryMap(transcript) {
+    if (transcript.length <= 150) return null;
+    const groups = [];
+    for (let i = 0; i < transcript.length; i += 60) groups.push(transcript.slice(i, i + 60));
+    const summaries = [];
+    for (let gi = 0; gi < groups.length; gi++) {
+      const g = groups[gi];
+      const body = g.map((s) => `${s.index}|${fmt(s.start)}|${s.text}`).join("\n");
+      const raw = await this.chat([
+        { role: "system", content: 'Summarise this transcript chunk for a video editor. Reply JSON: {"summary":string,"keyMoments":[{"segmentId":number,"why":string}]} where segmentId is the leading number of a line.' },
+        { role: "user", content: body },
+      ]);
+      const j = this.parseJSON(raw);
+      summaries.push({ chunk: gi + 1, range: [g[0].index, g[g.length - 1].index], summary: String(j.summary || ""), keyMoments: Array.isArray(j.keyMoments) ? j.keyMoments.slice(0, 12) : [] });
+    }
+    return summaries;
+  },
+  transcriptDigest(transcript) {
+    return transcript.map((s) => `${s.index}|${fmt(s.start)}-${fmt(s.end)}|${s.text}`).join("\n");
+  },
+  async generateVersions(instruction, transcript, priorChat, activePlan) {
+    const storyMap = await this.buildStoryMap(transcript);
+    const sys = [
+      "You are Clippi, a video edit planner. You cut videos by selecting transcript segments.",
+      "You NEVER invent timestamps. You only reference the integer segment indexes given to you.",
+      'Reply with STRICT JSON only, shape: {"summary": string, "versionA": {"label": string, "plan": [{"segmentId": number, "action": "keep"|"remove", "reason": string}]}, "versionB": {"label": string, "plan": [...]}}',
+      "versionA = Story cut: preserve narrative flow, context and setup, gentle trimming.",
+      "versionB = Impact cut: aggressive, keep only the strongest highlight moments, much shorter.",
+      "Every transcript segment index MUST appear exactly once in each plan with keep or remove.",
+    ].join(" ");
+    const parts = [];
+    if (storyMap) parts.push("STORY MAP (chunk summaries of a long transcript):\n" + JSON.stringify(storyMap));
+    parts.push("TRANSCRIPT (index|start-end|text):\n" + this.transcriptDigest(transcript));
+    if (activePlan && activePlan.length) parts.push("CURRENT ACTIVE PLAN (segmentId:action):\n" + activePlan.map((p) => p.segmentIndex + ":" + p.action).join(","));
+    if (priorChat && priorChat.length) parts.push("PRIOR CONVERSATION:\n" + priorChat.map((m) => m.role + ": " + m.content).join("\n").slice(-4000));
+    parts.push("INSTRUCTION FROM USER:\n" + instruction);
+    const raw = await this.chat([{ role: "system", content: sys }, { role: "user", content: parts.join("\n\n") }]);
+    const json = this.parseJSON(raw);
+    return validatePlanResponse(json, transcript);
+  },
+};
+
+function validatePlanResponse(json, transcript) {
+  if (!json || typeof json !== "object") throw new Error("AI response had an unexpected shape.");
+  const byIndex = new Map(transcript.map((s) => [s.index, s]));
+  const clean = (v, fallbackLabel) => {
+    if (!v || !Array.isArray(v.plan)) throw new Error("AI response is missing a valid edit plan.");
+    const seen = new Map();
+    for (const item of v.plan) {
+      if (!item || typeof item !== "object") continue;
+      const idx = Number(item.segmentId);
+      if (!Number.isFinite(idx) || !byIndex.has(idx)) continue;
+      const action = item.action === "remove" ? "remove" : item.action === "keep" ? "keep" : null;
+      if (!action) continue;
+      seen.set(idx, { segmentIndex: idx, action, reason: typeof item.reason === "string" ? item.reason.slice(0, 300) : "" });
+    }
+    if (!seen.size) throw new Error("The AI plan did not reference any real transcript segments. Retry with a clearer instruction.");
+    for (const s of transcript) if (!seen.has(s.index)) seen.set(s.index, { segmentIndex: s.index, action: "keep", reason: "" });
+    const plan = [...seen.values()].sort((a, b) => a.segmentIndex - b.segmentIndex);
+    if (!plan.some((p) => p.action === "keep")) throw new Error("The AI plan removed every segment. Retry with a clearer instruction.");
+    return { label: typeof v.label === "string" && v.label.trim() ? v.label.trim().slice(0, 60) : fallbackLabel, plan };
+  };
+  return {
+    summary: typeof json.summary === "string" ? json.summary.slice(0, 1200) : "Generated two alternative cuts.",
+    versionA: clean(json.versionA, "Version A - Story"),
+    versionB: clean(json.versionB, "Version B - Impact"),
+  };
+}
+
+/* ============================ DATA HELPERS ============================ */
+async function refreshProjects() {
+  const projects = (await getAll("projects")).sort((a, b) => b.updatedAt - a.updatedAt);
+  State.set({ projects });
+  await refreshStats(projects);
+}
+async function refreshStats(projects) {
+  const assets = await getAll("videoAssets");
+  const segs = await getAll("transcriptSegments");
+  const withTranscript = new Set(segs.map((s) => s.videoAssetId));
+  const minutes = assets.filter((a) => withTranscript.has(a.id)).reduce((n, a) => n + (a.duration || 0), 0) / 60;
+  let storage = assets.reduce((n, a) => n + ((a.blob && a.blob.size) || 0), 0);
+  try { if (navigator.storage && navigator.storage.estimate) { const e = await navigator.storage.estimate(); if (e && e.usage) storage = e.usage; } } catch (e) {}
+  State.set({ stats: { projects: (projects || S().projects).length, minutes, storage } });
+}
+async function loadProject(projectId) {
+  const project = await getRecord("projects", projectId);
+  if (!project) throw new Error("That project no longer exists.");
+  const assets = await getAllByIndex("videoAssets", "projectId", projectId);
+  const transcript = (await getAllByIndex("transcriptSegments", "projectId", projectId)).sort((a, b) => a.index - b.index);
+  const versions = (await getAllByIndex("editVersions", "projectId", projectId)).sort((a, b) => a.createdAt - b.createdAt);
+  const chat = (await getAllByIndex("chatMessages", "projectId", projectId)).sort((a, b) => a.createdAt - b.createdAt);
+  const map = {};
+  for (const v of versions) map[v.id] = (await getAllByIndex("editSegments", "editVersionId", v.id)).sort((a, b) => a.order - b.order);
+  State.set({
+    screen: "editor", currentProject: project, currentVideoAsset: assets[0] || null,
+    transcript, editVersions: versions, chatMessages: chat, editSegmentsByVersion: map,
+    activeVersionId: project.activeVersionId || (versions[0] ? versions[0].id : null),
+    selectedSegmentIds: [], search: { q: "", matches: [], cursor: 0 },
+    exportState: { status: "idle", progress: 0, url: null },
+    history: { undoStack: [], redoStack: [] },
+    processing: { stage: null, progress: 0, engine: null, message: "" },
+  });
+  localStorage.setItem("clippi:lastProject", projectId);
+}
+function activeEditSegments() { const s = S(); return (s.activeVersionId && s.editSegmentsByVersion[s.activeVersionId]) || []; }
+function keepMapFor(versionId) {
+  const list = (S().editSegmentsByVersion[versionId] || []);
+  const m = new Map();
+  for (const e of list) m.set(e.transcriptSegmentId, e.action);
+  return m;
+}
+function keptRanges(versionId) {
+  const m = keepMapFor(versionId);
+  const kept = S().transcript.filter((t) => (m.get(t.id) || "keep") === "keep");
+  const ranges = [];
+  for (const t of kept) {
+    const last = ranges[ranges.length - 1];
+    if (last && Math.abs(t.start - last.end) < 0.08) last.end = t.end;
+    else ranges.push({ start: t.start, end: t.end });
+  }
+  return ranges;
+}
+async function touchProject(patch = {}) {
+  const p = { ...S().currentProject, ...patch, updatedAt: now() };
+  await updateRecord("projects", p);
+  State.set({ currentProject: p });
+  return p;
+}
+
+/* history */
+function pushHistory(label) {
+  const snap = JSON.stringify({
+    transcript: S().transcript,
+    editSegmentsByVersion: S().editSegmentsByVersion,
+    activeVersionId: S().activeVersionId,
+  });
+  const undoStack = S().history.undoStack.concat([{ label, snap }]).slice(-40);
+  State.set({ history: { undoStack, redoStack: [] } });
+  const proj = S().currentProject;
+  if (proj) addRecord("editHistory", { id: uid(), projectId: proj.id, snapshotOf: "editVersion", refId: S().activeVersionId || proj.id, action: label, stateSnapshot: snap, createdAt: now() }).catch(() => {});
+}
+async function applySnapshot(snapStr) {
+  const s = JSON.parse(snapStr);
+  await runTransaction(["transcriptSegments", "editSegments", "projects"], async (api) => {
+    for (const t of s.transcript) api.put("transcriptSegments", t);
+    for (const list of Object.values(s.editSegmentsByVersion)) for (const e of list) api.put("editSegments", e);
+    api.put("projects", { ...S().currentProject, activeVersionId: s.activeVersionId, updatedAt: now() });
+  });
+  State.set({ transcript: s.transcript, editSegmentsByVersion: s.editSegmentsByVersion, activeVersionId: s.activeVersionId });
+}
+
+/* ============================ EVENT HANDLERS ============================ */
+Bus.on("project:create", async (name) => {
+  const p = { id: uid(), name: name.trim().slice(0, 60), createdAt: now(), updatedAt: now(), status: "draft", activeVersionId: null };
+  await addRecord("projects", p);
+  await refreshProjects();
+  await loadProject(p.id);
+});
+Bus.on("project:rename", async ({ id, name }) => {
+  const p = await getRecord("projects", id);
+  if (!p) throw new Error("Project not found.");
+  p.name = name.trim().slice(0, 60); p.updatedAt = now();
+  await updateRecord("projects", p);
+  if (S().currentProject && S().currentProject.id === id) State.set({ currentProject: p });
+  State.set({ ui: { ...S().ui, renamingId: null } });
+  await refreshProjects();
+});
+Bus.on("project:delete", async (id) => {
+  await runTransaction(Object.keys(STORES).filter((s) => s !== "appSettings"), async (api) => {
+    for (const store of ["videoAssets", "transcriptSegments", "chatMessages", "editHistory"]) {
+      const rows = await api.byIndex(store, "projectId", id);
+      rows.forEach((r) => api.del(store, r.id));
+    }
+    const versions = await api.byIndex("editVersions", "projectId", id);
+    for (const v of versions) {
+      const es = await api.byIndex("editSegments", "editVersionId", v.id);
+      es.forEach((e) => api.del("editSegments", e.id));
+      api.del("editVersions", v.id);
+    }
+    api.del("projects", id);
+  });
+  State.set({ ui: { ...S().ui, confirmDeleteId: null } });
+  if (S().currentProject && S().currentProject.id === id) State.set({ screen: "home", currentProject: null });
+  await refreshProjects();
+  toast("Project deleted.", "ok");
+});
+Bus.on("project:open", async (id) => { await loadProject(id); });
+
+Bus.on("video:import", async (file) => {
+  const proj = S().currentProject;
+  if (!proj) throw new Error("Open a project first.");
+  if (!file || !file.type || !file.type.startsWith("video/")) throw new Error("That file is not a video. Import an mp4, mov, webm or similar.");
+  if (file.size > 1024 * 1024 * 1024) toast("This file is over 1 GB — browser processing may be slow or hit storage limits.", "info");
+  State.set({ processing: { stage: "uploading", progress: 0, engine: null, message: "Storing video locally" } });
+  const duration = await probeDuration(file).catch(() => 0);
+  const asset = { id: uid(), projectId: proj.id, fileName: file.name, mimeType: file.type, duration, blob: file, createdAt: now() };
+  await addRecord("videoAssets", asset);
+  await touchProject({ status: "processing" });
+  State.set({ currentVideoAsset: asset, processing: { stage: null, progress: 0, engine: null, message: "" } });
+  await refreshProjects();
+  await runTranscription();
+});
+Bus.on("video:remove", async () => {
+  const a = S().currentVideoAsset; if (!a) return;
+  await resetMedia(a.id);
+  toast("Video and derived edits removed.", "ok");
+});
+Bus.on("video:replace", async (file) => {
+  const a = S().currentVideoAsset;
+  if (a) await resetMedia(a.id);
+  await Bus.emit("video:import", file);
+});
+async function resetMedia(assetId) {
+  const proj = S().currentProject;
+  await runTransaction(["videoAssets", "transcriptSegments", "editVersions", "editSegments", "projects"], async (api) => {
+    api.del("videoAssets", assetId);
+    (await api.byIndex("transcriptSegments", "projectId", proj.id)).forEach((r) => api.del("transcriptSegments", r.id));
+    const versions = await api.byIndex("editVersions", "projectId", proj.id);
+    for (const v of versions) {
+      (await api.byIndex("editSegments", "editVersionId", v.id)).forEach((e) => api.del("editSegments", e.id));
+      api.del("editVersions", v.id);
+    }
+    api.put("projects", { ...proj, activeVersionId: null, status: "draft", updatedAt: now() });
+  });
+  await loadProject(proj.id);
+  await refreshProjects();
+}
+function probeDuration(file) {
+  return new Promise((resolve, reject) => {
+    const v = document.createElement("video");
+    v.preload = "metadata";
+    v.onloadedmetadata = () => { const d = v.duration; URL.revokeObjectURL(v.src); resolve(isFinite(d) ? d : 0); };
+    v.onerror = () => reject(new Error("Could not read this video file."));
+    v.src = URL.createObjectURL(file);
+  });
+}
+
+async function runTranscription() {
+  const proj = S().currentProject, asset = S().currentVideoAsset;
+  if (!asset) throw new Error("Import a video first.");
+  let engine;
+  try { engine = await resolveEngine(); } catch (e) { State.set({ processing: { stage: null, progress: 0, engine: null, message: "" }, errors: { ...S().errors, transcribe: e.message } }); throw e; }
+  State.set({ errors: { ...S().errors, transcribe: null }, processing: { stage: "extracting", progress: 0, engine: engine.name, message: "Extracting audio track" } });
+  try {
+    const audio = await Media.extractAudio(asset.blob, (p) => State.set({ processing: { ...S().processing, progress: p } }));
+    State.set({ processing: { stage: "transcribing", progress: 0, engine: engine.name, message: "Loading transcription engine" } });
+    const segs = await engine.transcribe(audio, {
+      onStage: (m) => State.set({ processing: { ...S().processing, message: m } }),
+      onModel: (p, file) => State.set({ ui: { ...S().ui, modelProgress: p < 1 ? { p, file } : null }, processing: { ...S().processing, progress: p, message: "Downloading AI model (~400-500MB) — this only happens once" } }),
+    });
+    if (!segs.length) throw new Error("No speech was detected in this video.");
+    const rows = segs.map((s, i) => ({ id: uid(), projectId: proj.id, videoAssetId: asset.id, index: i, start: s.start, end: s.end, text: s.text, engineUsed: engine.name }));
+    await runTransaction(["transcriptSegments", "projects"], async (api) => {
+      (await api.byIndex("transcriptSegments", "projectId", proj.id)).forEach((r) => api.del("transcriptSegments", r.id));
+      rows.forEach((r) => api.put("transcriptSegments", r));
+      api.put("projects", { ...proj, status: "ready", updatedAt: now() });
+    });
+    State.set({ transcript: rows, currentProject: { ...proj, status: "ready" }, processing: { stage: null, progress: 0, engine: engine.name, message: "" }, ui: { ...S().ui, modelProgress: null } });
+    await refreshProjects();
+    Bus.emit("transcript:ready");
+    toast("Transcript ready — " + rows.length + " segments.", "ok");
+  } catch (e) {
+    State.set({ processing: { stage: null, progress: 0, engine: engine.name, message: "" }, errors: { ...S().errors, transcribe: e.message || String(e) } });
+    throw e;
+  }
+}
+
+Bus.on("transcript:edit", async ({ id, text }) => {
+  const t = text.trim();
+  if (!t) throw new Error("Segment text cannot be empty.");
+  pushHistory("transcript edit");
+  const transcript = S().transcript.map((s) => (s.id === id ? { ...s, text: t } : s));
+  await updateRecord("transcriptSegments", transcript.find((s) => s.id === id));
+  State.set({ transcript });
+});
+Bus.on("transcript:split", async (id) => {
+  const s = S().transcript.find((x) => x.id === id);
+  if (!s) return;
+  const words = s.text.split(/\s+/);
+  if (words.length < 2) throw new Error("This segment is too short to split.");
+  const half = Math.ceil(words.length / 2), mid = +(s.start + (s.end - s.start) / 2).toFixed(3);
+  pushHistory("split segment");
+  const a = { ...s, id: uid(), end: mid, text: words.slice(0, half).join(" ") };
+  const b = { ...s, id: uid(), start: mid, text: words.slice(half).join(" ") };
+  await rewriteTranscript(S().transcript.flatMap((x) => (x.id === id ? [a, b] : [x])));
+});
+Bus.on("transcript:merge", async (id) => {
+  const list = S().transcript, i = list.findIndex((x) => x.id === id);
+  if (i < 0 || i === list.length - 1) throw new Error("There is no following segment to merge with.");
+  pushHistory("merge segments");
+  const merged = { ...list[i], id: uid(), end: list[i + 1].end, text: (list[i].text + " " + list[i + 1].text).trim() };
+  await rewriteTranscript(list.flatMap((x, k) => (k === i ? [merged] : k === i + 1 ? [] : [x])));
+});
+async function rewriteTranscript(next) {
+  const proj = S().currentProject;
+  const rows = next.map((s, i) => ({ ...s, index: i }));
+  await runTransaction(["transcriptSegments", "editSegments", "editVersions"], async (api) => {
+    (await api.byIndex("transcriptSegments", "projectId", proj.id)).forEach((r) => api.del("transcriptSegments", r.id));
+    rows.forEach((r) => api.put("transcriptSegments", r));
+    const versions = await api.byIndex("editVersions", "projectId", proj.id);
+    for (const v of versions) {
+      const existing = await api.byIndex("editSegments", "editVersionId", v.id);
+      const byT = new Map(existing.map((e) => [e.transcriptSegmentId, e]));
+      existing.forEach((e) => api.del("editSegments", e.id));
+      rows.forEach((r, i) => api.put("editSegments", {
+        id: uid(), editVersionId: v.id, transcriptSegmentId: r.id,
+        action: (byT.get(r.id) && byT.get(r.id).action) || "keep",
+        reason: (byT.get(r.id) && byT.get(r.id).reason) || null, order: i,
+      }));
+    }
+  });
+  await loadProject(proj.id);
+}
+
+Bus.on("edit:apply", async ({ segmentIds, action }) => {
+  let versionId = S().activeVersionId;
+  if (!versionId) versionId = await createManualVersion();
+  pushHistory("manual " + action);
+  const list = (S().editSegmentsByVersion[versionId] || []).slice();
+  const byT = new Map(list.map((e) => [e.transcriptSegmentId, e]));
+  const changed = [];
+  for (const tid of segmentIds) {
+    let row = byT.get(tid);
+    if (!row) { row = { id: uid(), editVersionId: versionId, transcriptSegmentId: tid, action, reason: null, order: S().transcript.findIndex((t) => t.id === tid) }; list.push(row); byT.set(tid, row); }
+    row.action = action; row.reason = null; changed.push(row);
+  }
+  await runTransaction(["editSegments"], (api) => { changed.forEach((r) => api.put("editSegments", r)); });
+  State.set({ editSegmentsByVersion: { ...S().editSegmentsByVersion, [versionId]: list }, activeVersionId: versionId });
+});
+async function createManualVersion() {
+  const proj = S().currentProject;
+  const v = { id: uid(), projectId: proj.id, label: "Manual edit", createdAt: now(), parentVersionId: null, sourceInstructionId: null };
+  const segs = S().transcript.map((t, i) => ({ id: uid(), editVersionId: v.id, transcriptSegmentId: t.id, action: "keep", reason: null, order: i }));
+  await runTransaction(["editVersions", "editSegments", "projects"], (api) => {
+    api.put("editVersions", v); segs.forEach((s) => api.put("editSegments", s));
+    api.put("projects", { ...proj, activeVersionId: v.id, updatedAt: now() });
+  });
+  State.set({
+    editVersions: S().editVersions.concat([v]),
+    editSegmentsByVersion: { ...S().editSegmentsByVersion, [v.id]: segs },
+    activeVersionId: v.id, currentProject: { ...proj, activeVersionId: v.id },
+  });
+  return v.id;
+}
+Bus.on("edit:undo", async () => {
+  const { undoStack, redoStack } = S().history;
+  if (!undoStack.length) return;
+  const last = undoStack[undoStack.length - 1];
+  const current = JSON.stringify({ transcript: S().transcript, editSegmentsByVersion: S().editSegmentsByVersion, activeVersionId: S().activeVersionId });
+  await applySnapshot(last.snap);
+  State.set({ history: { undoStack: undoStack.slice(0, -1), redoStack: redoStack.concat([{ label: last.label, snap: current }]) } });
+});
+Bus.on("edit:redo", async () => {
+  const { undoStack, redoStack } = S().history;
+  if (!redoStack.length) return;
+  const nxt = redoStack[redoStack.length - 1];
+  const current = JSON.stringify({ transcript: S().transcript, editSegmentsByVersion: S().editSegmentsByVersion, activeVersionId: S().activeVersionId });
+  await applySnapshot(nxt.snap);
+  State.set({ history: { undoStack: undoStack.concat([{ label: nxt.label, snap: current }]), redoStack: redoStack.slice(0, -1) } });
+});
+
+Bus.on("version:select", async (id) => {
+  await touchProject({ activeVersionId: id });
+  State.set({ activeVersionId: id });
+});
+Bus.on("version:delete", async (id) => {
+  const proj = S().currentProject;
+  await runTransaction(["editVersions", "editSegments", "projects"], async (api) => {
+    (await api.byIndex("editSegments", "editVersionId", id)).forEach((e) => api.del("editSegments", e.id));
+    api.del("editVersions", id);
+    if (proj.activeVersionId === id) api.put("projects", { ...proj, activeVersionId: null, updatedAt: now() });
+  });
+  const map = { ...S().editSegmentsByVersion }; delete map[id];
+  const versions = S().editVersions.filter((v) => v.id !== id);
+  State.set({
+    editVersions: versions, editSegmentsByVersion: map,
+    activeVersionId: S().activeVersionId === id ? (versions[0] ? versions[0].id : null) : S().activeVersionId,
+    currentProject: proj.activeVersionId === id ? { ...proj, activeVersionId: null } : proj,
+    ui: { ...S().ui, confirmDeleteVersionId: null },
+  });
+});
+
+Bus.on("chat:send", async (instruction) => {
+  const text = instruction.trim();
+  if (!text) throw new Error("Type an edit instruction first.");
+  if (!S().transcript.length) throw new Error("Generate a transcript before asking for a cut.");
+  const proj = S().currentProject;
+  State.set({ ui: { ...S().ui, chatBusy: true }, errors: { ...S().errors, ai: null } });
+  const userMsg = { id: uid(), projectId: proj.id, role: "user", content: text, relatedVersionIds: null, createdAt: now() };
+  State.set({ chatMessages: S().chatMessages.concat([userMsg]) });
+  try {
+    const active = S().activeVersionId;
+    const activePlan = active ? (S().editSegmentsByVersion[active] || []).map((e) => {
+      const t = S().transcript.find((x) => x.id === e.transcriptSegmentId);
+      return { segmentIndex: t ? t.index : -1, action: e.action };
+    }).filter((x) => x.segmentIndex >= 0) : null;
+    const result = await AI.generateVersions(text, S().transcript, S().chatMessages.slice(-10), activePlan);
+    const parent = active || null;
+    const mk = (v, fallback) => {
+      const ver = { id: uid(), projectId: proj.id, label: v.label || fallback, createdAt: now(), parentVersionId: parent, sourceInstructionId: userMsg.id };
+      const byIndex = new Map(S().transcript.map((t) => [t.index, t]));
+      const segs = v.plan.map((p, i) => ({ id: uid(), editVersionId: ver.id, transcriptSegmentId: byIndex.get(p.segmentIndex).id, action: p.action, reason: p.reason || null, order: i }));
+      return { ver, segs };
+    };
+    const A = mk(result.versionA, "Version A - Story"), B = mk(result.versionB, "Version B - Impact");
+    const keptA = A.segs.filter((s) => s.action === "keep").length, keptB = B.segs.filter((s) => s.action === "keep").length;
+    const assistantMsg = {
+      id: uid(), projectId: proj.id, role: "assistant",
+      content: result.summary + "\n\n" + A.ver.label + ": keeps " + keptA + " of " + A.segs.length + " segments.\n" + B.ver.label + ": keeps " + keptB + " of " + B.segs.length + " segments.",
+      relatedVersionIds: [A.ver.id, B.ver.id], createdAt: now() + 1,
+    };
+    await runTransaction(["chatMessages", "editVersions", "editSegments", "projects"], (api) => {
+      api.put("chatMessages", userMsg);
+      api.put("editVersions", A.ver); A.segs.forEach((s) => api.put("editSegments", s));
+      api.put("editVersions", B.ver); B.segs.forEach((s) => api.put("editSegments", s));
+      api.put("chatMessages", assistantMsg);
+      api.put("projects", { ...proj, activeVersionId: A.ver.id, status: "ready", updatedAt: now() });
+    });
+    pushHistory("ai edit");
+    State.set({
+      chatMessages: S().chatMessages.concat([assistantMsg]),
+      editVersions: S().editVersions.concat([A.ver, B.ver]),
+      editSegmentsByVersion: { ...S().editSegmentsByVersion, [A.ver.id]: A.segs, [B.ver.id]: B.segs },
+      activeVersionId: A.ver.id,
+      currentProject: { ...proj, activeVersionId: A.ver.id, status: "ready" },
+      ui: { ...S().ui, chatBusy: false, compare: true },
+    });
+    await refreshProjects();
+  } catch (e) {
+    State.set({ ui: { ...S().ui, chatBusy: false }, errors: { ...S().errors, ai: e.message || String(e) }, chatMessages: S().chatMessages.filter((m) => m.id !== userMsg.id) });
+    Bus.emit("ai:error", e);
+    throw e;
+  }
+});
+
+Bus.on("export:start", async () => {
+  const asset = S().currentVideoAsset;
+  if (!asset) throw new Error("Import a video first.");
+  const vid = S().activeVersionId;
+  const ranges = vid ? keptRanges(vid) : S().transcript.map((t) => ({ start: t.start, end: t.end }));
+  if (!ranges.length) throw new Error("Nothing is marked as keep — nothing to export.");
+  State.set({ exportState: { status: "rendering", progress: 0, url: null } });
+  try {
+    const out = await Media.renderCut(asset.blob, ranges, (p) => State.set({ exportState: { ...S().exportState, progress: p } }));
+    const url = URL.createObjectURL(out);
+    State.set({ exportState: { status: "done", progress: 1, url } });
+    const a = el("a", { href: url, download: (S().currentProject.name || "clippi").replace(/[^\w-]+/g, "_") + "_cut.mp4" });
+    document.body.appendChild(a); a.click(); a.remove();
+    toast("Export complete.", "ok");
+  } catch (e) {
+    State.set({ exportState: { status: "error", progress: 0, url: null } });
+    throw new Error("Export failed: " + (e.message || e));
+  }
+});
+Bus.on("export:cancel", async () => { Media.cancel(); State.set({ exportState: { status: "idle", progress: 0, url: null } }); toast("Rendering cancelled.", "info"); });
+Bus.on("settings:update", async (patch) => {
+  const s = { ...S().settings, ...patch, key: "global" };
+  await updateRecord("appSettings", s);
+  State.set({ settings: s });
+  toast("Settings saved.", "ok");
+});
+
+/* ============================ UI: shell ============================ */
+const root = document.getElementById("app");
+function render() {
+  const s = S();
+  root.replaceChildren(s.screen === "home" ? HomeScreen() : s.screen === "settings" ? SettingsScreen() : EditorScreen());
+  refreshIcons();
+}
+function header(title, subtitle, right) {
+  return el("header", { class: "flex items-start justify-between gap-3 px-4 pt-6 pb-4" }, [
+    el("div", {}, [
+      el("h1", { class: "text-xl font-semibold tracking-tight", text: title }),
+      subtitle ? el("p", { class: "text-sm text-neutral-500 mt-0.5", text: subtitle }) : null,
+    ]),
+    el("div", { class: "flex items-center gap-2" }, right || []),
+  ]);
+}
+
+/* ============================ UI: HOME ============================ */
+function HomeScreen() {
+  const s = S();
+  const wrap = el("div", { class: "max-w-md mx-auto pb-24" });
+  wrap.appendChild(header("Clippi", "Transcript-first video editing, entirely in your browser.", [
+    btn("", { icon: "settings", title: "Settings", onclick: () => State.set({ screen: "settings" }) }),
+  ]));
+
+  // stats strip
+  wrap.appendChild(el("div", { class: "px-4" }, [
+    el("div", { class: "grid grid-cols-3 gap-2" }, [
+      stat("Projects", String(s.stats.projects), "folder"),
+      stat("Minutes", s.stats.minutes.toFixed(1), "clock"),
+      stat("Storage", bytes(s.stats.storage), "hard-drive"),
+    ]),
+  ]));
+
+  // new project
+  const nameInput = el("input", {
+    type: "text", maxlength: "60", placeholder: "Project name",
+    class: "flex-1 rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm outline-none focus:border-neutral-400",
+  });
+  const err = el("p", { class: "text-xs text-red-600 mt-1 hidden" });
+  const submit = async () => {
+    const v = nameInput.value.trim();
+    if (!v) { err.textContent = "Enter a project name."; err.classList.remove("hidden"); return; }
+    if (v.length > 60) { err.textContent = "Keep the name under 60 characters."; err.classList.remove("hidden"); return; }
+    err.classList.add("hidden"); nameInput.value = "";
+    await Bus.emit("project:create", v);
+  };
+  nameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+  wrap.appendChild(el("div", { class: "px-4 mt-5" }, [
+    el("div", { class: "rounded-xl border border-neutral-200 bg-white p-3 shadow-sm" }, [
+      el("div", { class: "flex items-center gap-2" }, [nameInput, btn("New project", { kind: "primary", icon: "plus", onclick: submit })]),
+      err,
+    ]),
+  ]));
+
+  // filter chips
+  const chips = ["all", "draft", "processing", "ready"].map((f) =>
+    el("button", {
+      type: "button",
+      class: `rounded-full border px-3 py-1 text-xs font-medium capitalize ${s.projectFilter === f ? "bg-neutral-900 text-white border-neutral-900" : "bg-white text-neutral-600 border-neutral-200"}`,
+      text: f, onclick: () => State.set({ projectFilter: f }),
+    }));
+  wrap.appendChild(el("div", { class: "px-4 mt-6 flex items-center justify-between" }, [
+    el("h2", { class: "text-sm font-semibold text-neutral-700", text: "Previous projects" }),
+    el("div", { class: "flex gap-1.5" }, chips),
+  ]));
+
+  const list = s.projects.filter((p) => s.projectFilter === "all" || p.status === s.projectFilter);
+  const listWrap = el("div", { class: "px-4 mt-3 flex flex-col gap-2" });
+  if (!s.projects.length) {
+    listWrap.appendChild(emptyState("film", "No projects yet", "Start your first one — name it above and import a video."));
+  } else if (!list.length) {
+    listWrap.appendChild(emptyState("filter", "No matches", "No projects with status “" + s.projectFilter + "”."));
+  } else {
+    list.forEach((p) => listWrap.appendChild(ProjectCard(p)));
+  }
+  wrap.appendChild(listWrap);
+  return wrap;
+}
+function stat(label, value, ic) {
+  return el("div", { class: "rounded-xl border border-neutral-200 bg-white p-3 shadow-sm" }, [
+    el("div", { class: "flex items-center gap-1.5 text-neutral-400 text-xs" }, [icon(ic), el("span", { text: label })]),
+    el("div", { class: "mt-1 text-lg font-semibold tabular-nums", text: value }),
+  ]);
+}
+function emptyState(ic, title, body) {
+  return el("div", { class: "rounded-xl border border-dashed border-neutral-300 bg-white/60 p-8 text-center" }, [
+    el("div", { class: "mx-auto mb-2 text-2xl text-neutral-400 w-fit" }, [icon(ic)]),
+    el("p", { class: "font-medium text-neutral-700", text: title }),
+    el("p", { class: "mt-1 text-sm text-neutral-500", text: body }),
+  ]);
+}
+function ProjectCard(p) {
+  const s = S();
+  if (s.ui.confirmDeleteId === p.id) {
+    return el("div", { class: "rounded-xl border border-red-200 bg-red-50 p-3 shadow-sm" }, [
+      el("p", { class: "text-sm text-red-700", text: "Delete “" + p.name + "” and all its data?" }),
+      el("div", { class: "mt-2 flex gap-2" }, [
+        btn("Confirm delete", { kind: "danger", icon: "trash-2", onclick: () => Bus.emit("project:delete", p.id) }),
+        btn("Cancel", { onclick: () => State.set({ ui: { ...s.ui, confirmDeleteId: null } }) }),
+      ]),
+    ]);
+  }
+  if (s.ui.renamingId === p.id) {
+    const inp = el("input", { type: "text", value: p.name, maxlength: "60", class: "flex-1 rounded-lg border border-neutral-300 px-2 py-1.5 text-sm outline-none focus:border-neutral-500" });
+    const e2 = el("p", { class: "text-xs text-red-600 mt-1 hidden" });
+    const save = () => { if (!inp.value.trim()) { e2.textContent = "Name is required."; e2.classList.remove("hidden"); return; } Bus.emit("project:rename", { id: p.id, name: inp.value }); };
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+    setTimeout(() => inp.focus(), 0);
+    return el("div", { class: "rounded-xl border border-neutral-200 bg-white p-3 shadow-sm" }, [
+      el("div", { class: "flex items-center gap-2" }, [inp, btn("Save", { kind: "primary", onclick: save }), btn("Cancel", { onclick: () => State.set({ ui: { ...s.ui, renamingId: null } }) })]),
+      e2,
+    ]);
+  }
+  const statusColor = { draft: "bg-neutral-100 text-neutral-600", processing: "bg-amber-100 text-amber-700", ready: "bg-emerald-100 text-emerald-700" }[p.status] || "bg-neutral-100";
+  return el("div", { class: "rounded-xl border border-neutral-200 bg-white p-3 shadow-sm flex items-center gap-3" }, [
+    el("button", { type: "button", class: "flex-1 text-left", onclick: () => Bus.emit("project:open", p.id) }, [
+      el("div", { class: "flex items-center gap-2" }, [
+        el("span", { class: "font-medium text-neutral-900", text: p.name }),
+        el("span", { class: "rounded-full px-2 py-0.5 text-[11px] font-medium " + statusColor, text: p.status }),
+      ]),
+      el("p", { class: "mt-0.5 text-xs text-neutral-500", text: "Updated " + new Date(p.updatedAt).toLocaleString() }),
+    ]),
+    btn("", { icon: "pencil", title: "Rename", onclick: () => State.set({ ui: { ...s.ui, renamingId: p.id } }) }),
+    btn("", { icon: "trash-2", kind: "danger", title: "Delete", onclick: () => State.set({ ui: { ...s.ui, confirmDeleteId: p.id } }) }),
+  ]);
+}
+
+/* ============================ UI: SETTINGS ============================ */
+function SettingsScreen() {
+  const s = S(), st = s.settings || DEFAULT_SETTINGS;
+  const wrap = el("div", { class: "max-w-md mx-auto pb-24" });
+  wrap.appendChild(header("Settings", "Engines and keys are stored locally in this browser.", [
+    btn("Back", { icon: "arrow-left", onclick: () => State.set({ screen: s.currentProject ? "editor" : "home" }) }),
+  ]));
+  const section = (title, children) => el("section", { class: "px-4 mt-4" }, [
+    el("h2", { class: "text-sm font-semibold text-neutral-700 mb-2", text: title }),
+    el("div", { class: "rounded-xl border border-neutral-200 bg-white p-3 shadow-sm flex flex-col gap-3" }, children),
+  ]);
+  const engineOption = (value, label, desc, disabled) => el("button", {
+    type: "button", disabled,
+    class: `w-full text-left rounded-xl border p-3 transition ${st.transcriptionEngine === value ? "border-neutral-900 bg-neutral-50" : "border-neutral-200 hover:bg-neutral-50"} ${disabled ? "opacity-50 cursor-not-allowed" : ""}`,
+    onclick: () => Bus.emit("settings:update", { transcriptionEngine: value }),
+  }, [
+    el("div", { class: "flex items-center gap-2" }, [
+      icon(st.transcriptionEngine === value ? "circle-dot" : "circle", "text-neutral-500"),
+      el("span", { class: "font-medium text-sm", text: label }),
+    ]),
+    el("p", { class: "mt-1 text-xs text-neutral-500 pl-6", text: desc }),
+  ]);
+  const gpuNote = el("p", { class: "text-xs text-neutral-500", text: "Detecting WebGPU support…" });
+  hasWebGPU().then((ok) => { gpuNote.textContent = ok ? "WebGPU detected in this browser." : "WebGPU is unavailable here; WASM will be used automatically."; });
+
+  wrap.appendChild(section("Transcription engine", [
+    engineOption("webgpu", "WebGPU Whisper", "Fastest local option. Runs on your GPU, fully offline once the model is cached."),
+    engineOption("wasm", "WASM Whisper", "Works everywhere. Slower, but no GPU required and fully offline."),
+    engineOption("cloud", "Cloud (BYOK)", "Uses your own OpenAI or Groq key. Fastest for long videos, requires network."),
+    gpuNote,
+  ]));
+
+  const sizeRow = el("div", { class: "flex gap-2" }, ["tiny", "base", "small"].map((sz) =>
+    el("button", {
+      type: "button",
+      class: `flex-1 rounded-xl border px-3 py-2 text-sm capitalize ${st.preferredModelSize === sz ? "border-neutral-900 bg-neutral-50 font-medium" : "border-neutral-200"}`,
+      text: sz, onclick: () => Bus.emit("settings:update", { preferredModelSize: sz }),
+    })));
+  wrap.appendChild(section("Local model size", [sizeRow, el("p", { class: "text-xs text-neutral-500", text: "Larger models are more accurate and take longer to download and run." })]));
+
+  const provRow = el("div", { class: "flex gap-2" }, ["openai", "groq"].map((pv) =>
+    el("button", {
+      type: "button",
+      class: `flex-1 rounded-xl border px-3 py-2 text-sm capitalize ${st.cloudProvider === pv ? "border-neutral-900 bg-neutral-50 font-medium" : "border-neutral-200"}`,
+      text: pv, onclick: () => Bus.emit("settings:update", { cloudProvider: pv }),
+    })));
+  const keyInput = el("input", { type: "password", value: st.cloudApiKey || "", placeholder: "sk-…", class: "w-full rounded-xl border border-neutral-200 px-3 py-2 text-sm outline-none focus:border-neutral-400" });
+  const keyErr = el("p", { class: "text-xs text-red-600 hidden" });
+  wrap.appendChild(section("Cloud transcription key (BYOK)", [
+    provRow, keyInput, keyErr,
+    el("p", { class: "text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2", text: "This key is stored only in your browser and is not secret-safe; anyone with access to this device or browser storage can read it." }),
+    el("div", { class: "flex gap-2" }, [
+      btn("Save key", {
+        kind: "primary", icon: "save", onclick: () => {
+          const v = keyInput.value.trim();
+          if (!v || v.length < 20 || /\s/.test(v)) { keyErr.textContent = "That does not look like a valid API key."; keyErr.classList.remove("hidden"); return; }
+          keyErr.classList.add("hidden");
+          Bus.emit("settings:update", { cloudApiKey: v, cloudProvider: st.cloudProvider || "openai" });
+        },
+      }),
+      btn("Clear API key", { kind: "danger", icon: "eraser", onclick: () => { keyInput.value = ""; Bus.emit("settings:update", { cloudApiKey: "" }); } }),
+    ]),
+  ]));
+
+  const llmProvRow = el("div", { class: "flex gap-2" }, ["openai", "groq"].map((pv) =>
+    el("button", {
+      type: "button",
+      class: `flex-1 rounded-xl border px-3 py-2 text-sm capitalize ${(st.llmProvider || "openai") === pv ? "border-neutral-900 bg-neutral-50 font-medium" : "border-neutral-200"}`,
+      text: pv, onclick: () => Bus.emit("settings:update", { llmProvider: pv }),
+    })));
+  const llmKey = el("input", { type: "password", value: st.llmApiKey || "", placeholder: "Key for AI cut generation", class: "w-full rounded-xl border border-neutral-200 px-3 py-2 text-sm outline-none focus:border-neutral-400" });
+  const llmModel = el("input", { type: "text", value: st.llmModel || "", placeholder: "Model (optional, e.g. gpt-4o-mini)", class: "w-full rounded-xl border border-neutral-200 px-3 py-2 text-sm outline-none focus:border-neutral-400" });
+  const llmErr = el("p", { class: "text-xs text-red-600 hidden" });
+  wrap.appendChild(section("AI cut generation key (BYOK)", [
+    llmProvRow, llmKey, llmModel, llmErr,
+    el("p", { class: "text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2", text: "Stored only in your browser and not secret-safe. Leave empty to reuse the transcription key when providers match." }),
+    el("div", { class: "flex gap-2" }, [
+      btn("Save", {
+        kind: "primary", icon: "save", onclick: () => {
+          const v = llmKey.value.trim();
+          if (v && (v.length < 20 || /\s/.test(v))) { llmErr.textContent = "That does not look like a valid API key."; llmErr.classList.remove("hidden"); return; }
+          llmErr.classList.add("hidden");
+          Bus.emit("settings:update", { llmApiKey: v, llmModel: llmModel.value.trim() });
+        },
+      }),
+      btn("Clear", { kind: "danger", icon: "eraser", onclick: () => { llmKey.value = ""; Bus.emit("settings:update", { llmApiKey: "" }); } }),
+    ]),
+  ]));
+  return wrap;
+}
+
+/* ============================ UI: EDITOR ============================ */
+let videoEl = null, videoURL = null;
+function EditorScreen() {
+  const s = S();
+  const wrap = el("div", { class: "max-w-md md:max-w-6xl mx-auto pb-32" });
+  wrap.appendChild(header(s.currentProject ? s.currentProject.name : "Editor", s.currentVideoAsset ? s.currentVideoAsset.fileName : "No video imported yet", [
+    btn("", { icon: "undo-2", title: "Undo", disabled: !s.history.undoStack.length, onclick: () => Bus.emit("edit:undo") }),
+    btn("", { icon: "redo-2", title: "Redo", disabled: !s.history.redoStack.length, onclick: () => Bus.emit("edit:redo") }),
+    btn("", { icon: "settings", title: "Settings", onclick: () => State.set({ screen: "settings" }) }),
+    btn("", { icon: "home", title: "Home", onclick: () => { State.set({ screen: "home", currentProject: null }); refreshProjects(); } }),
+  ]));
+
+  const grid = el("div", { class: "px-4 grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]" });
+  grid.appendChild(el("div", { class: "flex flex-col gap-4" }, [VideoPanel(), ProcessingPanel(), TimelinePanel(), VersionsPanel()]));
+  grid.appendChild(el("div", { class: "flex flex-col gap-4" }, [TranscriptPanel(), ChatPanel()]));
+  wrap.appendChild(grid);
+  return wrap;
+}
+function card(title, right, children, cls = "") {
+  return el("section", { class: "rounded-xl border border-neutral-200 bg-white shadow-sm " + cls }, [
+    title ? el("div", { class: "flex items-center justify-between border-b border-neutral-100 px-3 py-2" }, [
+      el("h2", { class: "text-sm font-semibold text-neutral-700", text: title }),
+      el("div", { class: "flex items-center gap-1.5" }, right || []),
+    ]) : null,
+    el("div", { class: "p-3" }, children),
+  ]);
+}
+
+function VideoPanel() {
+  const s = S();
+  if (!s.currentVideoAsset) return card("Video", [], [ImportZone()]);
+  if (videoURL) URL.revokeObjectURL(videoURL);
+  videoURL = URL.createObjectURL(s.currentVideoAsset.blob);
+  videoEl = el("video", { src: videoURL, class: "w-full rounded-lg bg-black aspect-video", playsinline: true, controls: false });
+  const time = el("span", { class: "text-xs tabular-nums text-neutral-500", text: "00:00 / " + fmt(s.currentVideoAsset.duration) });
+  const bar = el("input", { type: "range", min: "0", max: String(Math.max(1, s.currentVideoAsset.duration)), step: "0.01", value: "0", class: "flex-1 accent-neutral-900" });
+  const play = btn("", { icon: "play", title: "Play/pause", onclick: () => { videoEl.paused ? videoEl.play() : videoEl.pause(); } });
+  videoEl.addEventListener("timeupdate", () => {
+    bar.value = String(videoEl.currentTime);
+    time.textContent = fmt(videoEl.currentTime) + " / " + fmt(videoEl.duration || s.currentVideoAsset.duration);
+    highlightActiveSegment(videoEl.currentTime);
+  });
+  videoEl.addEventListener("play", () => { play.replaceChildren(icon("pause")); refreshIcons(); });
+  videoEl.addEventListener("pause", () => { play.replaceChildren(icon("play")); refreshIcons(); });
+  bar.addEventListener("input", () => { videoEl.currentTime = Number(bar.value); });
+
+  const fileInput = el("input", { type: "file", accept: "video/*", class: "hidden", onchange: (e) => { const f = e.target.files[0]; if (f) Bus.emit("video:replace", f); } });
+  return card("Video", [
+    btn("", { icon: "repeat", title: "Replace video", onclick: () => fileInput.click() }),
+    btn("", { icon: "trash-2", kind: "danger", title: "Remove video", onclick: () => Bus.emit("video:remove") }),
+  ], [
+    videoEl,
+    el("div", { class: "mt-2 flex items-center gap-2" }, [play, bar, time]),
+    el("p", { class: "mt-2 text-xs text-neutral-500", text: "Replacing or removing the video also clears its transcript and generated edits." }),
+    fileInput,
+  ]);
+}
+function ImportZone() {
+  const fileInput = el("input", { type: "file", accept: "video/*", class: "hidden", onchange: (e) => { const f = e.target.files[0]; if (f) Bus.emit("video:import", f); } });
+  const zone = el("div", {
+    class: "rounded-xl border-2 border-dashed border-neutral-300 p-8 text-center cursor-pointer hover:bg-neutral-50",
+    onclick: () => fileInput.click(),
+    ondragover: (e) => { e.preventDefault(); zone.classList.add("bg-neutral-50"); },
+    ondragleave: () => zone.classList.remove("bg-neutral-50"),
+    ondrop: (e) => { e.preventDefault(); zone.classList.remove("bg-neutral-50"); const f = e.dataTransfer.files[0]; if (f) Bus.emit("video:import", f); },
+  }, [
+    el("div", { class: "mx-auto w-fit text-2xl text-neutral-400" }, [icon("upload")]),
+    el("p", { class: "mt-2 font-medium text-neutral-700", text: "Drop a video here" }),
+    el("p", { class: "mt-1 text-sm text-neutral-500", text: "or click to choose a file. Nothing leaves your device." }),
+  ]);
+  return el("div", {}, [zone, fileInput]);
+}
+function ProcessingPanel() {
+  const s = S();
+  const items = [];
+  if (s.processing.stage) {
+    items.push(el("div", { class: "rounded-xl border border-neutral-200 bg-white p-3 shadow-sm" }, [
+      el("div", { class: "flex items-center gap-2 text-sm font-medium text-neutral-700" }, [icon("loader", "animate-spin"), el("span", { text: stageLabel(s.processing) })]),
+      progressBar(s.processing.progress),
+      s.processing.message ? el("p", { class: "mt-1 text-xs text-neutral-500", text: s.processing.message }) : null,
+      el("div", { class: "mt-2" }, [btn("Cancel", { kind: "danger", icon: "x", onclick: () => { Media.cancel(); State.set({ processing: { stage: null, progress: 0, engine: null, message: "" } }); toast("Processing cancelled.", "info"); } })]),
+    ]));
+  }
+  if (s.errors.transcribe) {
+    items.push(errorBox(s.errors.transcribe, () => runTranscription()));
+  }
+  if (s.exportState.status === "rendering") {
+    items.push(el("div", { class: "rounded-xl border border-neutral-200 bg-white p-3 shadow-sm" }, [
+      el("div", { class: "flex items-center gap-2 text-sm font-medium" }, [icon("loader", "animate-spin"), el("span", { text: "Rendering export" })]),
+      progressBar(s.exportState.progress),
+      el("div", { class: "mt-2" }, [btn("Cancel render", { kind: "danger", icon: "x", onclick: () => Bus.emit("export:cancel") })]),
+    ]));
+  }
+  if (s.exportState.status === "error") items.push(errorBox("Export failed. Try again with a shorter selection.", () => Bus.emit("export:start")));
+  return items.length ? el("div", { class: "flex flex-col gap-3" }, items) : el("div", { class: "hidden" });
+}
+function stageLabel(p) {
+  const map = { uploading: "Storing video", extracting: "Extracting audio", transcribing: "Transcribing with " + (p.engine || "engine"), exporting: "Rendering export" };
+  return map[p.stage] || "Working";
+}
+function progressBar(v) {
+  return el("div", { class: "mt-2 h-1.5 w-full rounded-full bg-neutral-100 overflow-hidden" }, [
+    el("div", { class: "h-full bg-neutral-900 transition-all", style: "width:" + Math.round((v || 0) * 100) + "%" }),
+  ]);
+}
+function errorBox(msg, retry) {
+  return el("div", { class: "rounded-xl border border-red-200 bg-red-50 p-3" }, [
+    el("div", { class: "flex items-start gap-2 text-sm text-red-700" }, [icon("alert-triangle", "mt-0.5"), el("span", { class: "flex-1", text: msg })]),
+    retry ? el("div", { class: "mt-2" }, [btn("Retry", { icon: "rotate-cw", onclick: retry })]) : null,
+  ]);
+}
+
+function TimelinePanel() {
+  const s = S();
+  if (!s.transcript.length) return el("div", { class: "hidden" });
+  const total = s.transcript[s.transcript.length - 1].end || 1;
+  const m = s.activeVersionId ? keepMapFor(s.activeVersionId) : new Map();
+  const strip = el("div", { class: "flex h-6 w-full overflow-hidden rounded-lg border border-neutral-200" },
+    s.transcript.map((t) => el("button", {
+      type: "button", title: fmt(t.start) + " — " + t.text.slice(0, 60),
+      class: ((m.get(t.id) || "keep") === "keep" ? "bg-neutral-800 hover:bg-neutral-700" : "bg-neutral-200 hover:bg-neutral-300"),
+      style: "flex:" + Math.max(0.4, t.end - t.start),
+      onclick: () => seekTo(t.start),
+    })));
+  const kept = keptRanges(s.activeVersionId || "").reduce((n, r) => n + (r.end - r.start), 0);
+  return card("Timeline", [], [
+    strip,
+    el("p", { class: "mt-2 text-xs text-neutral-500", text: "Kept " + fmt(kept) + " of " + fmt(total) + " · dark = keep, light = removed" }),
+    el("div", { class: "mt-2 flex flex-wrap gap-2" }, [
+      btn("Export cut", { kind: "primary", icon: "download", disabled: S().exportState.status === "rendering", onclick: () => Bus.emit("export:start") }),
+      S().exportState.url ? btn("Download again", { icon: "download", onclick: () => { const a = el("a", { href: S().exportState.url, download: "clippi_cut.mp4" }); document.body.appendChild(a); a.click(); a.remove(); } }) : null,
+    ]),
+  ]);
+}
+
+function VersionsPanel() {
+  const s = S();
+  if (!s.editVersions.length) return el("div", { class: "hidden" });
+  const rows = s.editVersions.map((v) => {
+    if (s.ui.confirmDeleteVersionId === v.id) {
+      return el("div", { class: "rounded-xl border border-red-200 bg-red-50 p-3" }, [
+        el("p", { class: "text-sm text-red-700", text: "Delete “" + v.label + "”?" }),
+        el("div", { class: "mt-2 flex gap-2" }, [
+          btn("Confirm", { kind: "danger", onclick: () => Bus.emit("version:delete", v.id) }),
+          btn("Cancel", { onclick: () => State.set({ ui: { ...s.ui, confirmDeleteVersionId: null } }) }),
+        ]),
+      ]);
+    }
+    const segs = s.editSegmentsByVersion[v.id] || [];
+    const kept = segs.filter((e) => e.action === "keep").length;
+    const dur = keptRanges(v.id).reduce((n, r) => n + (r.end - r.start), 0);
+    const active = s.activeVersionId === v.id;
+    return el("div", { class: `rounded-xl border p-3 ${active ? "border-neutral-900 bg-neutral-50" : "border-neutral-200"}` }, [
+      el("div", { class: "flex items-center gap-2" }, [
+        icon(active ? "circle-dot" : "circle", "text-neutral-500"),
+        el("span", { class: "flex-1 text-sm font-medium", text: v.label }),
+        btn("", { icon: "trash-2", kind: "danger", title: "Delete version", onclick: () => State.set({ ui: { ...s.ui, confirmDeleteVersionId: v.id } }) }),
+      ]),
+      el("p", { class: "mt-1 text-xs text-neutral-500", text: "Keeps " + kept + " of " + segs.length + " segments · " + fmt(dur) }),
+      el("div", { class: "mt-2 flex flex-wrap gap-2" }, [
+        btn(active ? "Active" : "Use this version", { kind: active ? "subtle" : "primary", icon: "check", disabled: active, onclick: () => Bus.emit("version:select", v.id) }),
+        btn("Preview", { icon: "play-circle", onclick: () => previewVersion(v.id) }),
+      ]),
+      v.parentVersionId ? el("p", { class: "mt-1 text-[11px] text-neutral-400", text: "Refined from an earlier version" }) : null,
+    ]);
+  });
+  return card("Versions", [
+    btn(s.ui.compare ? "Stack" : "Compare", { icon: "columns-2", onclick: () => State.set({ ui: { ...s.ui, compare: !s.ui.compare } }) }),
+  ], [el("div", { class: s.ui.compare ? "grid gap-3 sm:grid-cols-2" : "flex flex-col gap-3" }, rows)]);
+}
+let previewTimer = null;
+function previewVersion(versionId) {
+  if (!videoEl) return;
+  const ranges = keptRanges(versionId);
+  if (!ranges.length) { toast("This version keeps nothing to preview.", "info"); return; }
+  clearInterval(previewTimer);
+  let i = 0;
+  videoEl.currentTime = ranges[0].start;
+  videoEl.play();
+  previewTimer = setInterval(() => {
+    if (!videoEl || videoEl.paused) return;
+    if (videoEl.currentTime >= ranges[i].end - 0.02) {
+      i++;
+      if (i >= ranges.length) { videoEl.pause(); clearInterval(previewTimer); return; }
+      videoEl.currentTime = ranges[i].start;
+    }
+  }, 60);
+}
+function seekTo(t) { if (videoEl) { videoEl.currentTime = t; videoEl.play().catch(() => {}); } }
+function highlightActiveSegment(time) {
+  const list = S().transcript;
+  const seg = list.find((s) => time >= s.start && time < s.end);
+  document.querySelectorAll("[data-seg]").forEach((n) => n.classList.remove("seg-active"));
+  if (!seg) return;
+  const node = document.querySelector(`[data-seg="${seg.id}"]`);
+  if (node) { node.classList.add("seg-active"); const p = node.parentElement; if (p && p.scrollHeight > p.clientHeight) p.scrollTop = node.offsetTop - p.offsetTop - 60; }
+}
+
+function TranscriptPanel() {
+  const s = S();
+  const searchInput = el("input", { type: "search", value: s.search.q, placeholder: "Search transcript", class: "w-full rounded-xl border border-neutral-200 px-3 py-2 text-sm outline-none focus:border-neutral-400" });
+  searchInput.addEventListener("input", debounce((e) => {
+    const q = e.target.value.trim().toLowerCase();
+    const matches = q ? S().transcript.filter((t) => t.text.toLowerCase().includes(q)).map((t) => t.id) : [];
+    State.set({ search: { q: e.target.value, matches, cursor: 0 } });
+  }, 300));
+
+  const body = el("div", { class: "mt-2 flex flex-col gap-1.5 max-h-[28rem] overflow-y-auto relative" });
+  if (!s.transcript.length) {
+    body.appendChild(emptyState("file-text", "No transcript yet", s.currentVideoAsset ? "Run transcription to generate segments." : "Import a video to generate a transcript."));
+  } else {
+    const q = s.search.q.trim().toLowerCase();
+    const visible = s.transcript;
+    if (q && !s.search.matches.length) body.appendChild(el("p", { class: "text-sm text-neutral-500 p-3", text: "No segments match “" + s.search.q + "”." }));
+    visible.forEach((t) => body.appendChild(SegmentRow(t, q)));
+  }
+
+  const right = [];
+  if (s.search.matches.length) right.push(btn(s.search.cursor + 1 + "/" + s.search.matches.length, {
+    icon: "chevron-down", onclick: () => {
+      const cur = (s.search.cursor + 1) % s.search.matches.length;
+      State.set({ search: { ...s.search, cursor: cur } });
+      const t = S().transcript.find((x) => x.id === s.search.matches[cur]);
+      if (t) seekTo(t.start);
+    },
+  }));
+  if (s.currentVideoAsset) right.push(btn("", { icon: "rotate-cw", title: "Re-run transcription", disabled: !!s.processing.stage, onclick: () => runTranscription() }));
+  const selectionBar = s.selectedSegmentIds.length ? el("div", { class: "mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-neutral-200 bg-neutral-50 p-2" }, [
+    el("span", { class: "text-xs text-neutral-600", text: s.selectedSegmentIds.length + " selected" }),
+    btn("Keep", { icon: "check", onclick: () => Bus.emit("edit:apply", { segmentIds: s.selectedSegmentIds, action: "keep" }) }),
+    btn("Remove", { icon: "scissors", kind: "danger", onclick: () => Bus.emit("edit:apply", { segmentIds: s.selectedSegmentIds, action: "remove" }) }),
+    btn("Clear", { onclick: () => State.set({ selectedSegmentIds: [] }) }),
+  ]) : null;
+
+  return card("Transcript", right, [searchInput, selectionBar, body]);
+}
+function SegmentRow(t, q) {
+  const s = S();
+  const action = s.activeVersionId ? (keepMapFor(s.activeVersionId).get(t.id) || "keep") : "keep";
+  const selected = s.selectedSegmentIds.includes(t.id);
+  const textNode = el("p", { class: "text-sm leading-snug " + (action === "remove" ? "text-neutral-400 line-through" : "text-neutral-800") });
+  if (q && t.text.toLowerCase().includes(q)) {
+    const idx = t.text.toLowerCase().indexOf(q);
+    textNode.appendChild(document.createTextNode(t.text.slice(0, idx)));
+    textNode.appendChild(el("mark", { text: t.text.slice(idx, idx + q.length) }));
+    textNode.appendChild(document.createTextNode(t.text.slice(idx + q.length)));
+  } else textNode.textContent = t.text;
+
+  const editBox = () => {
+    const inp = el("textarea", { class: "w-full rounded-lg border border-neutral-300 p-2 text-sm outline-none focus:border-neutral-500", rows: "2" });
+    inp.value = t.text;
+    const e2 = el("p", { class: "text-xs text-red-600 hidden mt-1" });
+    const save = () => { if (!inp.value.trim()) { e2.textContent = "Text is required."; e2.classList.remove("hidden"); return; } Bus.emit("transcript:edit", { id: t.id, text: inp.value }); };
+    const holder = el("div", { class: "mt-1" }, [inp, e2, el("div", { class: "mt-1 flex gap-2" }, [btn("Save", { kind: "primary", onclick: save }), btn("Cancel", { onclick: () => row.replaceChild(textNode, holder) })])]);
+    return holder;
+  };
+
+  const reason = s.activeVersionId ? ((s.editSegmentsByVersion[s.activeVersionId] || []).find((e) => e.transcriptSegmentId === t.id) || {}).reason : null;
+  const row = el("div", {
+    "data-seg": t.id,
+    class: `rounded-xl border p-2 transition ${selected ? "border-neutral-900 bg-neutral-50" : "border-neutral-200 bg-white"}`,
+  }, [
+    el("div", { class: "flex items-center gap-2" }, [
+      el("button", { type: "button", class: "text-[11px] tabular-nums text-neutral-500 hover:text-neutral-900", text: fmt(t.start), onclick: () => seekTo(t.start) }),
+      el("span", { class: "flex-1" }),
+      el("button", { type: "button", title: "Toggle select", class: "text-neutral-400 hover:text-neutral-900", onclick: () => State.set({ selectedSegmentIds: selected ? s.selectedSegmentIds.filter((x) => x !== t.id) : s.selectedSegmentIds.concat([t.id]) }) }, [icon(selected ? "check-square" : "square")]),
+      el("button", { type: "button", title: action === "keep" ? "Mark remove" : "Mark keep", class: "text-neutral-400 hover:text-neutral-900", onclick: () => Bus.emit("edit:apply", { segmentIds: [t.id], action: action === "keep" ? "remove" : "keep" }) }, [icon(action === "keep" ? "scissors" : "rotate-ccw")]),
+      el("button", { type: "button", title: "Edit text", class: "text-neutral-400 hover:text-neutral-900", onclick: () => { const b = editBox(); row.replaceChild(b, textNode); refreshIcons(); } }, [icon("pencil")]),
+      el("button", { type: "button", title: "Split segment", class: "text-neutral-400 hover:text-neutral-900", onclick: () => Bus.emit("transcript:split", t.id) }, [icon("split")]),
+      el("button", { type: "button", title: "Merge with next", class: "text-neutral-400 hover:text-neutral-900", onclick: () => Bus.emit("transcript:merge", t.id) }, [icon("merge")]),
+    ]),
+    textNode,
+    reason ? el("p", { class: "mt-1 text-[11px] text-neutral-400", text: "AI: " + reason }) : null,
+  ]);
+  return row;
+}
+
+function ChatPanel() {
+  const s = S();
+  const list = el("div", { class: "flex flex-col gap-2 max-h-64 overflow-y-auto" });
+  if (!s.chatMessages.length) list.appendChild(emptyState("message-square", "No messages yet", "Describe the edit you want, for example: cut the small talk and keep the product demo."));
+  s.chatMessages.forEach((m) => {
+    list.appendChild(el("div", { class: "flex " + (m.role === "user" ? "justify-end" : "justify-start") }, [
+      el("div", { class: `max-w-[85%] whitespace-pre-wrap rounded-xl border px-3 py-2 text-sm ${m.role === "user" ? "bg-neutral-900 text-white border-neutral-900" : "bg-neutral-50 text-neutral-800 border-neutral-200"}`, text: m.content }),
+    ]));
+  });
+  setTimeout(() => { list.scrollTop = list.scrollHeight; }, 0);
+
+  const input = el("textarea", { rows: "2", placeholder: "Tell Clippi what to cut…", class: "w-full rounded-xl border border-neutral-200 px-3 py-2 text-sm outline-none focus:border-neutral-400" });
+  const inputErr = el("p", { class: "text-xs text-red-600 hidden mt-1" });
+  const send = () => {
+    if (!input.value.trim()) { inputErr.textContent = "Enter an instruction first."; inputErr.classList.remove("hidden"); return; }
+    inputErr.classList.add("hidden");
+    const v = input.value; input.value = "";
+    Bus.emit("chat:send", v);
+  };
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+
+  const children = [list];
+  if (s.ui.chatBusy) children.push(el("div", { class: "mt-2 flex items-center gap-2 text-sm text-neutral-500" }, [icon("loader", "animate-spin"), el("span", { text: "Generating two alternative cuts…" })]));
+  if (s.errors.ai) children.push(el("div", { class: "mt-2" }, [errorBox(s.errors.ai, null)]));
+  children.push(el("div", { class: "mt-2" }, [input, inputErr, el("div", { class: "mt-1 flex justify-end" }, [btn("Generate cuts", { kind: "primary", icon: "sparkles", disabled: s.ui.chatBusy, onclick: send })])]));
+  return card("AI editor", [], children);
+}
+
+/* ============================ INIT ============================ */
+State.subscribe("*", () => render());
+(async function init() {
+  try {
+    await openDB();
+    const settings = await loadSettings();
+    State.set({ settings });
+    Bus.emit("engine:detect");
+    await refreshProjects();
+    render();
+    const last = localStorage.getItem("clippi:lastProject");
+    if (last) { const p = await getRecord("projects", last); if (p) await loadProject(last); }
+  } catch (e) {
+    root.replaceChildren(el("div", { class: "max-w-md mx-auto p-6" }, [errorBox(e.message || String(e), () => location.reload())]));
+    refreshIcons();
+  }
+})();
+</script>
+</body>
+</html>
