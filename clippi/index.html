@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Clippi v2.6 — Transcript-first AI video editor</title>
+<title>Clippi v2.7 — Transcript-first AI video editor</title>
 <meta name="description" content="Clippi turns a natural-language instruction into a real editable cut. Upload a video, get a timestamped transcript, edit by text or by chat, export locally." />
 <meta property="og:title" content="Clippi — Transcript-first AI video editor" />
 <meta property="og:description" content="Upload a video, get a timestamped transcript, describe your edit, compare two AI cuts, export in-browser." />
@@ -281,16 +281,14 @@ const Media = {
         rejectCapture(err);
       }
     }, 6000);
-    try {
-      await ctx.resume();
-      await video.play();
-    } catch (e) {
+    Promise.all([ctx.resume(), video.play()]).catch((e) => {
+      if (settled) return;
       clearTimeout(watchdog);
       cleanup();
       const err = new Error('GestureRequired');
       err.name = 'GestureRequired';
       rejectCapture(err);
-    }
+    });
     promise.finally(() => clearTimeout(watchdog));
     return promise;
   },
@@ -537,6 +535,23 @@ function validatePlanResponse(json, transcript) {
 }
 
 /* ============================ DATA HELPERS ============================ */
+function getEditedTime(rawT, ranges) {
+  let e = 0;
+  for (const r of ranges) {
+    if (rawT > r.end) e += (r.end - r.start);
+    else if (rawT >= r.start) { e += (rawT - r.start); break; }
+  }
+  return e;
+}
+function getRawTime(editedT, ranges) {
+  let e = 0;
+  for (const r of ranges) {
+    const dur = r.end - r.start;
+    if (editedT <= e + dur) return r.start + (editedT - e);
+    e += dur;
+  }
+  return ranges.length ? ranges[ranges.length - 1].end : 0;
+}
 async function refreshProjects() {
   const projects = (await getAll("projects")).sort((a, b) => b.updatedAt - a.updatedAt);
   State.set({ projects });
@@ -666,11 +681,10 @@ Bus.on("video:import", async (file) => {
   if (!file || !file.type || !file.type.startsWith("video/")) throw new Error("That file is not a video. Import an mp4, mov, webm or similar.");
   if (file.size > 1024 * 1024 * 1024) toast("This file is over 1 GB — browser processing may be slow or hit storage limits.", "info");
   State.set({ processing: { stage: "uploading", progress: 0, engine: null, message: "Storing video locally" } });
-  const duration = await probeDuration(file).catch(() => 0);
-  const asset = { id: uid(), projectId: proj.id, fileName: file.name, mimeType: file.type, duration, blob: file, createdAt: now() };
-  await addRecord("videoAssets", asset);
-  await touchProject({ status: "processing" });
-  State.set({ currentVideoAsset: asset, processing: { stage: null, progress: 0, engine: null, message: "" } });
+  const duration = await probeDuration(file).catch(() => 0);  const asset = { id: uid(), projectId: proj.id, fileName: file.name, mimeType: file.type, duration, blob: file, createdAt: now() };
+  await addRecord('videoAssets', asset);
+  await touchProject({ status: 'processing' });
+  State.set({ currentVideoAsset: asset, processing: { stage: null, progress: 0, engine: null, message: '', startedAt: 0 } });
   await refreshProjects();
   await runTranscription();
 });
@@ -714,7 +728,7 @@ async function runTranscription() {
   if (!asset) throw new Error('Import a video first.');
   let engine;
   try { engine = await resolveEngine(); } catch (e) { State.set({ processing: { stage: null, progress: 0, engine: null, message: '', gesturePrompt: false }, errors: { ...S().errors, transcribe: e.message } }); throw e; }
-  State.set({ errors: { ...S().errors, transcribe: null }, processing: { stage: 'extracting', progress: 0, engine: engine.name, message: 'Reading audio from video', gesturePrompt: false } });
+  State.set({ errors: { ...S().errors, transcribe: null }, processing: { stage: 'extracting', progress: 0, engine: engine.name, message: 'Reading audio from video', gesturePrompt: false, startedAt: now() } });
   try {
     const audio = await withTimeout(Media.extractAudioNative(asset.blob, (p) => State.set({ processing: { ...S().processing, progress: p, message: 'Reading audio from video', gesturePrompt: false } })), 45000);
     State.set({ processing: { stage: "transcribing", progress: 0, engine: engine.name, message: "Loading transcription engine" } });
@@ -947,12 +961,8 @@ Bus.on("export:start", async () => {
   if (!ranges.length) throw new Error("Nothing is marked as keep — nothing to export.");
   State.set({ exportState: { status: "rendering", progress: 0, url: null } });
   try {
-    const out = await withTimeout(Media.renderCut(asset.blob, ranges, (p) => State.set({ exportState: { ...S().exportState, progress: p } })), 45000);
-    const url = URL.createObjectURL(out);
-    State.set({ exportState: { status: "done", progress: 1, url } });
-    const a = el("a", { href: url, download: (S().currentProject.name || "clippi").replace(/[^\w-]+/g, "_") + "_cut.mp4" });
-    document.body.appendChild(a); a.click(); a.remove();
-    toast("Export complete.", "ok");
+    const out = await withTimeout(Media.renderCut(asset.blob, ranges, (p) => State.set({ exportState: { ...S().exportState, progress: p } })), 45000);    const url = URL.createObjectURL(out);
+    State.set({ exportState: { status: 'done', progress: 1, url } });
   } catch (e) {
     State.set({ exportState: { status: "error", progress: 0, url: null } });
     throw new Error("Export failed: " + (e.message || e));
@@ -1239,8 +1249,31 @@ function EditorScreen() {
   wrap.appendChild(el('div', { class: 'sticky top-16 z-20 bg-[#f7f7f6] px-4 pb-2' }, [MediaBar()]));
   wrap.appendChild(el('div', { class: 'px-4 flex flex-col gap-4 mt-2' }, [ActivityFeed(), Composer()]));
   if (s.ui.cutsSheetOpenForMessageId) wrap.appendChild(CutsBottomSheet());
+  if (s.ui.renderSheetOpen) wrap.appendChild(RenderBottomSheet());
   if (s.ui.autoExpandTranscript) setTimeout(() => State.set({ ui: { ...S().ui, autoExpandTranscript: false, expandedFeedItems: { ...S().ui.expandedFeedItems, transcript: true } } }), 0);
   return wrap;
+}
+function RenderBottomSheet() {
+  const s = S(), p = s.exportState, isB = p.status === 'rendering';
+  const close = () => { if (!isB) State.set({ ui: { ...S().ui, renderSheetOpen: false } }); };
+  const rBtn = (l, ic, fn) => btn(l, { icon: ic, class: 'w-full justify-start border-none bg-neutral-50 px-4 py-3 text-sm font-medium hover:bg-neutral-100 disabled:opacity-50', disabled: isB, onclick: fn });
+  const mkAction = (t) => () => {
+    if (p.url) { handleOutput(p.url, t); close(); return; }
+    Bus.emit('export:start');
+    const c = setInterval(() => { const st = S().exportState; if (st.status === 'done' && st.url) { clearInterval(c); handleOutput(st.url, t); close(); } else if (st.status === 'error' || st.status === 'idle') clearInterval(c); }, 500);
+  };
+  const handleOutput = (url, t) => {
+    if (t === 'dl') { const a = el('a', { href: url, download: 'clippi_cut.mp4' }); document.body.appendChild(a); a.click(); a.remove(); toast('Export complete.', 'ok'); }
+    if (t === 'tab') window.open(url, '_blank');
+    if (t === 'copy') { navigator.clipboard.writeText(url); toast('Blob URL copied — note this link only works in this browser tab session.', 'ok'); }
+  };
+  return el('div', { class: 'fixed inset-x-0 bottom-0 z-40 rounded-t-3xl border border-neutral-200 bg-white shadow-[0_-4px_24px_rgba(0,0,0,0.15)] max-w-md md:max-w-6xl mx-auto p-4 flex flex-col gap-2 mb-3' }, [
+    el('div', { class: 'flex items-center justify-between mb-2' }, [ el('h2', { class: 'font-semibold text-sm', text: 'Render' }), btn('', { icon: 'x', onclick: close }) ]),
+    isB ? progressBar(p.progress) : null,
+    rBtn('Download file', 'download', mkAction('dl')),
+    rBtn('Open in new tab', 'external-link', mkAction('tab')),
+    rBtn('Copy blob URL', 'copy', mkAction('copy')),
+  ]);
 }
 function CutsBottomSheet() {
   const s = S(), msg = s.chatMessages.find(m => m.id === s.ui.cutsSheetOpenForMessageId);
@@ -1270,7 +1303,7 @@ function MediaBar() {
     el("div", { class: "min-w-0 flex-1" }, [
       el("p", { class: "truncate text-sm font-semibold", text: s.currentVideoAsset.fileName }),
       el("p", { class: "mt-0.5 text-xs text-neutral-500", text: status }),
-    ]),    expanded ? el('button', { type: 'button', title: 'Render cut', class: 'grid h-9 w-9 shrink-0 place-items-center rounded-full bg-neutral-900 text-white shadow-sm', onclick: () => Bus.emit('export:start') }, [icon('download', 'h-4 w-4')]) : null,
+    ]),    expanded ? el('button', { type: 'button', title: 'Render', class: 'grid h-9 w-9 shrink-0 place-items-center rounded-full bg-neutral-900 text-white shadow-sm', onclick: () => State.set({ ui: { ...S().ui, renderSheetOpen: true } }) }, [icon('external-link', 'h-4 w-4')]) : null,
     expanded ? el('div', { class: 'relative' }, [
       btn('', { icon: 'more-vertical', title: 'Options', onclick: () => State.set({ ui: { ...S().ui, mediaMenuOpen: !s.ui.mediaMenuOpen } }) }),
       s.ui.mediaMenuOpen ? el('div', { class: 'absolute right-0 top-full mt-1 w-40 rounded-xl border border-neutral-200 bg-white shadow-lg z-50 p-1 flex flex-col' }, [
@@ -1281,14 +1314,19 @@ function MediaBar() {
     el('button', { type: 'button', title: expanded ? 'Collapse video' : 'Expand video', class: 'grid h-9 w-9 place-items-center rounded-full bg-black text-white', onclick: () => State.set({ ui: { ...S().ui, mediaBarExpanded: !expanded, mediaMenuOpen: false } }) }, [icon(expanded ? 'chevron-up' : 'chevron-down')]),
   ]);
   const media = expanded ? VideoPanel() : null;
-  const replaceInput = el("input", { "data-media-replace": "", type: "file", accept: "video/*", class: "hidden", onchange: (e) => { const f = e.target.files[0]; if (f) Bus.emit("video:replace", f); } });
-  return el("section", { class: "rounded-3xl border border-neutral-200 bg-white p-4 shadow-sm" }, [head, replaceInput, expanded ? el("div", { class: "mt-3" }, [media]) : null]);
+  const replaceInput = el("input", { "data-media-replace": "", type: "file", accept: "video/*", class: "hidden", onchange: (e) => { const f = e.target.files[0]; if (f) Bus.emit("video:replace", f); } });  return el('section', { class: 'rounded-3xl border border-neutral-200 bg-white p-3 shadow-sm' }, [head, replaceInput, expanded ? el('div', { class: 'mt-2' }, [media]) : null]);
 }
 function ThoughtChip(open, onToggle, detail) {
-  return el("div", { class: "mt-3" }, [
-    el("button", { type: "button", class: "inline-flex items-center gap-1.5 rounded-full bg-neutral-100 px-3 py-1.5 text-xs text-neutral-600", onclick: onToggle }, [icon("pencil", "h-3 w-3"), el("span", { text: "Thought for 0s" }), icon(open ? "chevron-up" : "chevron-down", "h-3 w-3")]),
-    open && detail ? el("p", { class: "mt-2 rounded-xl bg-neutral-50 px-3 py-2 text-xs text-neutral-500", text: detail }) : null,
+  return el('div', { class: 'mt-3' }, [
+    el('button', { type: 'button', class: 'inline-flex items-center gap-1.5 rounded-full bg-neutral-100 px-3 py-1.5 text-xs text-neutral-600', onclick: onToggle }, [icon('pencil', 'h-3 w-3'), el('span', { text: 'Thought for 0s' }), icon(open ? 'chevron-up' : 'chevron-down', 'h-3 w-3')]),
+    open && detail ? el('p', { class: 'mt-2 rounded-xl bg-neutral-50 px-3 py-2 text-xs text-neutral-500', text: detail }) : null,
   ]);
+}
+function TickingThoughtChip(startTime) {
+  const node = el('div', { class: 'inline-flex items-center gap-1.5 rounded-full bg-neutral-100 px-3 py-1.5 text-xs text-neutral-600 w-fit' }, [icon('loader', 'h-3 w-3 animate-spin'), el('span', { text: 'Thinking...' })]);
+  const update = () => { if (!node.isConnected) return; node.children[1].textContent = 'Thought for ' + Math.floor((Date.now() - startTime) / 1000) + 's'; setTimeout(update, 1000); };
+  setTimeout(update, 1000);
+  return node;
 }
 function ActivityFeed() {
   const s = S(), feed = [];
@@ -1304,15 +1342,15 @@ function ActivityFeed() {
     feed.push(el('div', { class: 'py-2 flex flex-col gap-3' }, [
       el('div', { class: 'flex w-full items-center gap-3 text-left' }, [
         el('span', { class: 'grid h-9 w-9 place-items-center rounded-full bg-neutral-100' }, [icon(s.processing.stage ? 'loader' : 'file-text', s.processing.stage ? 'animate-spin' : '')]),
-        el('span', { class: 'flex-1 min-w-0 flex flex-col gap-0.5' }, [
+        el('span', { class: 'flex-1 min-w-0 flex flex-col gap-1 mt-1' }, [
           el('span', { class: 'block text-sm font-semibold', text: s.processing.stage === 'extracting' ? 'Reading audio' : s.processing.stage === 'transcribing' ? 'Transcribing' : s.errors.transcribe ? 'Transcription failed' : s.transcript.length ? 'Transcript ready' : 'Waiting to start' }),
-          ...tLogs.map(l => el('span', { class: 'block truncate text-xs text-neutral-500', text: l }))
+          ...tLogs.map(l => el('p', { class: 'text-xs text-neutral-500', text: l }))
         ]),
         s.processing.stage ? btn('', { icon: 'square', title: 'Stop', class: 'rounded-full p-2', onclick: () => { Media.cancel(); State.set({ processing: { stage: null, progress: 0, engine: null, message: '', gesturePrompt: false }, errors: { ...S().errors, transcribe: 'Transcription cancelled. Retry when ready.' } }); } }) : (!s.transcript.length && !s.errors.transcribe ? btn('Generate', { class: 'rounded-full', onclick: () => runTranscription() }) : btn('Retry', { class: 'rounded-full', onclick: () => runTranscription() })),
         el('button', { type: 'button', title: 'Expand transcript', class: 'p-2', onclick: () => State.set({ ui: { ...S().ui, expandedFeedItems: { ...S().ui.expandedFeedItems, transcript: !open } } }) }, [icon(open ? 'chevron-up' : 'chevron-down', 'h-4 w-4')]),
       ]),
       s.processing.gesturePrompt ? el('div', { class: 'rounded-xl border border-blue-200 bg-blue-50 p-3' }, [btn('Tap to start audio processing', { kind: 'primary', icon: 'play', class: 'w-full justify-center', onclick: () => runTranscription() })]) : null,
-      s.processing.stage && !s.processing.gesturePrompt ? progressBar(s.processing.progress) : null,
+      s.processing.stage && !s.processing.gesturePrompt ? el('div', { class: 'mt-2' }, [TickingThoughtChip(s.processing.startedAt || now()), progressBar(s.processing.progress)]) : null,
       s.errors.transcribe ? errorBox(s.errors.transcribe, () => runTranscription()) : null,
       open && !s.processing.stage && !s.errors.transcribe ? el('div', { class: 'border-t border-neutral-100 pt-3' }, [TranscriptPanel()]) : null,
     ]));
@@ -1339,7 +1377,8 @@ function ActivityFeed() {
         }
         return el('div', { class: 'flex flex-col' }, [ el('div', { class: 'flex justify-end' }, [ isEd ? editBox : el('div', { ...evts, class: 'max-w-[85%] rounded-2xl bg-neutral-900 px-3 py-2 text-sm text-white text-left cursor-pointer transition active:scale-[0.98]', text: m.content }) ]), actRow ]);
       })(),
-      el('div', { class: 'flex flex-col gap-0.5 px-2 mt-1' }, cLogs.map((l, i) => el('span', { class: 'text-xs ' + (i === cLogs.length - 1 && !related && !errorText ? 'text-neutral-900 animate-pulse' : 'text-neutral-500'), text: l }))),
+      el('div', { class: 'flex flex-col gap-1 px-2 mt-2' }, cLogs.map((l, i) => el('p', { class: 'text-xs ' + (i === cLogs.length - 1 && !related && !errorText ? 'text-neutral-900 animate-pulse' : 'text-neutral-500'), text: l }))),
+      (!related && !errorText && isBusy) ? el('div', { class: 'px-2 mt-1' }, [TickingThoughtChip(m.createdAt)]) : null,
       errorText ? errorBox(errorText, () => Bus.emit('chat:send', m.content)) : null,
       related ? el('button', { type: 'button', class: 'mt-1 flex w-full items-center gap-2 text-left text-sm', onclick: () => State.set({ ui: { ...S().ui, cutsSheetOpenForMessageId: m.id } }) }, [icon('columns-2', 'h-4 w-4'), el('span', { class: 'flex-1 font-semibold', text: m.content.slice(0, 42) }), el('span', { class: 'text-xs text-neutral-500', text: 'View cuts' }), icon('chevron-right', 'h-4 w-4')]) : null,
     ]));
@@ -1380,26 +1419,28 @@ function VideoPanel() {
     videoURLAssetId = s.currentVideoAsset.id;
   }
   videoEl = el('video', { src: videoURL, poster: 'data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'640\' height=\'360\'%3E%3Crect width=\'100%25\' height=\'100%25\' fill=\'%23252525\'/%3E%3C/svg%3E', class: 'w-full rounded-lg bg-neutral-900 aspect-video', playsinline: true, disablePictureInPicture: true, controlsList: 'nodownload nofullscreen noremoteplayback' });
-  const time = el('span', { class: 'text-xs tabular-nums text-neutral-500', text: '00:00 / ' + fmt(s.currentVideoAsset.duration) });
-  const bar = el('input', { type: 'range', min: '0', max: String(Math.max(1, s.currentVideoAsset.duration)), step: '0.01', value: '0', class: 'flex-1 accent-neutral-900' });
   const ranges = s.activeVersionId ? keptRanges(s.activeVersionId) : [];
   const editedDur = ranges.reduce((n, r) => n + (r.end - r.start), 0);
   const totalDur = s.transcript.length ? s.transcript[s.transcript.length - 1].end : (s.currentVideoAsset.duration || 1);
   const hasRemovals = editedDur > 0 && editedDur < totalDur - 0.1;
+  const dispDur = hasRemovals ? editedDur : totalDur;
+  const time = el('span', { class: 'text-xs tabular-nums text-neutral-500', text: '00:00 / ' + fmt(dispDur) });
+  const bar = el('input', { type: 'range', min: '0', max: String(Math.max(1, dispDur)), step: '0.01', value: '0', class: 'flex-1 accent-neutral-900' });
   const play = btn('', { icon: 'play', title: 'Play/pause', onclick: () => { if (!videoEl.paused) { videoEl.pause(); } else if (hasRemovals) { previewVersion(s.activeVersionId); } else { isPreviewMode = false; videoEl.play().catch(() => {}); } } });  videoEl.addEventListener('timeupdate', () => {
-    bar.value = String(videoEl.currentTime);
-    if (isPreviewMode && s.activeVersionId) {
-      let elapsed = 0;
-      for (const r of ranges) { if (videoEl.currentTime > r.end) elapsed += (r.end - r.start); else if (videoEl.currentTime >= r.start) elapsed += (videoEl.currentTime - r.start); }
-      time.textContent = fmt(elapsed) + ' / ' + fmt(editedDur);
-    } else { time.textContent = fmt(videoEl.currentTime) + ' / ' + fmt(videoEl.duration || s.currentVideoAsset.duration); }
+    const cur = hasRemovals ? getEditedTime(videoEl.currentTime, ranges) : videoEl.currentTime;
+    bar.value = String(cur);
+    time.textContent = fmt(cur) + ' / ' + fmt(dispDur);
     highlightActiveSegment(videoEl.currentTime);
   });  videoEl.addEventListener('play', () => { play.replaceChildren(icon('pause')); refreshIcons(); });
   videoEl.addEventListener('pause', () => { play.replaceChildren(icon('play')); refreshIcons(); isPreviewMode = false; });
-  bar.addEventListener('input', () => { isPreviewMode = false; videoEl.currentTime = Number(bar.value); });  const fileInput = el('input', { type: 'file', accept: 'video/*', class: 'hidden', onchange: (e) => { const f = e.target.files[0]; if (f) Bus.emit('video:replace', f); } });
+  bar.addEventListener('input', () => {
+    isPreviewMode = false;
+    videoEl.currentTime = hasRemovals ? getRawTime(Number(bar.value), ranges) : Number(bar.value);
+  });
+  const fileInput = el('input', { type: 'file', accept: 'video/*', class: 'hidden', onchange: (e) => { const f = e.target.files[0]; if (f) Bus.emit('video:replace', f); } });
   return el('div', {}, [
     videoEl,
-    el('div', { class: 'mt-2 flex items-center gap-2' }, [play, bar, time, hasRemovals ? el('span', { class: 'text-[10px] font-medium text-neutral-500 bg-neutral-100 px-1.5 py-0.5 rounded', text: 'Playing edited version' }) : null]),
+    el('div', { class: 'mt-1.5 flex items-center gap-2' }, [play, bar, time]),
     fileInput,
   ]);
 }
@@ -1458,10 +1499,8 @@ function TimelinePanel() {
   const kept = keptRanges(s.activeVersionId || "").reduce((n, r) => n + (r.end - r.start), 0);
   return card("Timeline", [], [
     strip,
-    el("p", { class: "mt-2 text-xs text-neutral-500", text: "Kept " + fmt(kept) + " of " + fmt(total) + " · dark = keep, light = removed" }),
-    el("div", { class: "mt-2 flex flex-wrap gap-2" }, [
-      btn("Export cut", { kind: "primary", icon: "download", disabled: S().exportState.status === "rendering", onclick: () => Bus.emit("export:start") }),
-      S().exportState.url ? btn("Download again", { icon: "download", onclick: () => { const a = el("a", { href: S().exportState.url, download: "clippi_cut.mp4" }); document.body.appendChild(a); a.click(); a.remove(); } }) : null,
+    el("p", { class: "mt-2 text-xs text-neutral-500", text: "Kept " + fmt(kept) + " of " + fmt(total) + " · dark = keep, light = removed" }),    el('div', { class: 'mt-2 flex flex-wrap gap-2' }, [
+      btn('Export cut', { kind: 'primary', icon: 'external-link', onclick: () => State.set({ ui: { ...S().ui, renderSheetOpen: true } }) })
     ]),
   ]);
 }
