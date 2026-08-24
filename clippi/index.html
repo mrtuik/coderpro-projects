@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Clippi v2.4 — Transcript-first AI video editor</title>
+<title>Clippi v2.6 — Transcript-first AI video editor</title>
 <meta name="description" content="Clippi turns a natural-language instruction into a real editable cut. Upload a video, get a timestamped transcript, edit by text or by chat, export locally." />
 <meta property="og:title" content="Clippi — Transcript-first AI video editor" />
 <meta property="og:description" content="Upload a video, get a timestamped transcript, describe your edit, compare two AI cuts, export in-browser." />
@@ -598,6 +598,20 @@ function pushHistory(label) {
   const proj = S().currentProject;
   if (proj) addRecord("editHistory", { id: uid(), projectId: proj.id, snapshotOf: "editVersion", refId: S().activeVersionId || proj.id, action: label, stateSnapshot: snap, createdAt: now() }).catch(() => {});
 }
+async function deleteMessageAndAfter(pId, msgId) {
+  const all = (await getAllByIndex('chatMessages', 'projectId', pId)).sort((a,b)=>a.createdAt-b.createdAt), idx = all.findIndex(m => m.id === msgId);
+  if (idx < 0) return;
+  const msgIds = all.slice(idx).map(m=>m.id);
+  await runTransaction(['chatMessages', 'editVersions', 'editSegments', 'projects'], async (api) => {
+    msgIds.forEach(id => api.del('chatMessages', id));
+    const vToDel = (await api.byIndex('editVersions', 'projectId', pId)).filter(v => msgIds.includes(v.sourceInstructionId) || (v.relatedVersionIds && v.relatedVersionIds.some(rv => msgIds.includes(rv))));
+    for (const v of vToDel) { (await api.byIndex('editSegments', 'editVersionId', v.id)).forEach(s => api.del('editSegments', s.id)); api.del('editVersions', v.id); }
+    const p = S().currentProject;
+    if (p && p.activeVersionId && vToDel.find(v=>v.id===p.activeVersionId)) api.put('projects', {...p, activeVersionId: null, updatedAt: now()});
+  });
+  await loadProject(pId); State.set({ ui: { ...S().ui, msgActionOpen: null, editingMsgId: null } });
+}
+
 async function applySnapshot(snapStr) {
   const s = JSON.parse(snapStr);
   await runTransaction(["transcriptSegments", "editSegments", "projects"], async (api) => {
@@ -1224,9 +1238,22 @@ function EditorScreen() {
   ], 'sticky top-0 z-30 bg-[#f7f7f6]'));
   wrap.appendChild(el('div', { class: 'sticky top-16 z-20 bg-[#f7f7f6] px-4 pb-2' }, [MediaBar()]));
   wrap.appendChild(el('div', { class: 'px-4 flex flex-col gap-4 mt-2' }, [ActivityFeed(), Composer()]));
+  if (s.ui.cutsSheetOpenForMessageId) wrap.appendChild(CutsBottomSheet());
   if (s.ui.autoExpandTranscript) setTimeout(() => State.set({ ui: { ...S().ui, autoExpandTranscript: false, expandedFeedItems: { ...S().ui.expandedFeedItems, transcript: true } } }), 0);
   return wrap;
 }
+function CutsBottomSheet() {
+  const s = S(), msg = s.chatMessages.find(m => m.id === s.ui.cutsSheetOpenForMessageId);
+  if (!msg) return el('div');
+  return el('div', { class: 'fixed inset-x-0 bottom-0 z-40 flex flex-col rounded-t-3xl border border-neutral-200 bg-white shadow-[0_-4px_24px_rgba(0,0,0,0.15)] h-[85vh] max-w-md md:max-w-6xl mx-auto overflow-hidden' }, [
+    el('div', { class: 'flex items-center justify-between px-4 py-3 border-b border-neutral-100 bg-neutral-50' }, [
+      el('h2', { class: 'font-semibold text-sm text-neutral-900', text: 'Cuts for: ' + msg.content.slice(0, 30) + '...' }),
+      btn('', { icon: 'x', title: 'Close', onclick: () => State.set({ ui: { ...S().ui, cutsSheetOpenForMessageId: null } }) })
+    ]),
+    el('div', { class: 'flex-1 overflow-y-auto p-4 flex flex-col gap-4 pb-32 bg-white' }, [ VideoPanel(), el('div', { class: 'border-t border-neutral-100' }), VersionsPanel() ])
+  ]);
+}
+
 function MediaBar() {
   const s = S();
   if (!s.currentVideoAsset) {
@@ -1243,10 +1270,15 @@ function MediaBar() {
     el("div", { class: "min-w-0 flex-1" }, [
       el("p", { class: "truncate text-sm font-semibold", text: s.currentVideoAsset.fileName }),
       el("p", { class: "mt-0.5 text-xs text-neutral-500", text: status }),
-    ]),
-    expanded ? btn("", { icon: "repeat", title: "Replace video", onclick: () => document.querySelector('[data-media-replace]')?.click() }) : null,
-    expanded ? btn("", { icon: "trash-2", kind: "danger", title: "Remove video", onclick: () => Bus.emit("video:remove") }) : null,
-    el("button", { type: "button", title: expanded ? "Collapse video" : "Expand video", class: "grid h-9 w-9 place-items-center rounded-full bg-black text-white", onclick: () => State.set({ ui: { ...S().ui, mediaBarExpanded: !expanded } }) }, [icon(expanded ? "chevron-up" : "chevron-down")]),
+    ]),    expanded ? el('button', { type: 'button', title: 'Render cut', class: 'grid h-9 w-9 shrink-0 place-items-center rounded-full bg-neutral-900 text-white shadow-sm', onclick: () => Bus.emit('export:start') }, [icon('download', 'h-4 w-4')]) : null,
+    expanded ? el('div', { class: 'relative' }, [
+      btn('', { icon: 'more-vertical', title: 'Options', onclick: () => State.set({ ui: { ...S().ui, mediaMenuOpen: !s.ui.mediaMenuOpen } }) }),
+      s.ui.mediaMenuOpen ? el('div', { class: 'absolute right-0 top-full mt-1 w-40 rounded-xl border border-neutral-200 bg-white shadow-lg z-50 p-1 flex flex-col' }, [
+        btn('Replace video', { icon: 'repeat', class: 'w-full justify-start border-none shadow-none text-left', onclick: () => { State.set({ ui: { ...S().ui, mediaMenuOpen: false } }); document.querySelector('[data-media-replace]')?.click(); } }),
+        btn('Delete video', { icon: 'trash-2', kind: 'danger', class: 'w-full justify-start border-none shadow-none text-left', onclick: () => { State.set({ ui: { ...S().ui, mediaMenuOpen: false } }); Bus.emit('video:remove'); } })
+      ]) : null
+    ]) : null,
+    el('button', { type: 'button', title: expanded ? 'Collapse video' : 'Expand video', class: 'grid h-9 w-9 place-items-center rounded-full bg-black text-white', onclick: () => State.set({ ui: { ...S().ui, mediaBarExpanded: !expanded, mediaMenuOpen: false } }) }, [icon(expanded ? 'chevron-up' : 'chevron-down')]),
   ]);
   const media = expanded ? VideoPanel() : null;
   const replaceInput = el("input", { "data-media-replace": "", type: "file", accept: "video/*", class: "hidden", onchange: (e) => { const f = e.target.files[0]; if (f) Bus.emit("video:replace", f); } });
@@ -1295,11 +1327,21 @@ function ActivityFeed() {
     if (related) cLogs.push('Edit generation complete');
     if (errorText) cLogs.push(errorText === 'Interrupted — retry' ? 'Generation interrupted' : 'Failed');
     feed.push(el('div', { class: 'py-2 flex flex-col gap-3' }, [
-      el('div', { class: 'rounded-2xl bg-neutral-900 px-3 py-2 text-sm text-white', text: m.content }),
+      (() => {
+        const isEd = s.ui.editingMsgId === m.id, isOp = s.ui.msgActionOpen === m.id;
+        let t;
+        const evts = { ontouchstart: () => { t = setTimeout(() => State.set({ ui: { ...S().ui, msgActionOpen: m.id } }), 500); }, ontouchend: () => clearTimeout(t), ontouchmove: () => clearTimeout(t), oncontextmenu: (e) => { e.preventDefault(); State.set({ ui: { ...S().ui, msgActionOpen: m.id } }); } };
+        const actRow = (isOp && !isEd) ? el('div', { class: 'flex justify-end gap-2 mt-1 px-2' }, [ btn('', { icon: 'copy', title: 'Copy', onclick: () => { navigator.clipboard.writeText(m.content); toast('Copied.', 'ok'); State.set({ ui: { ...S().ui, msgActionOpen: null } }); } }), btn('', { icon: 'pencil', title: 'Edit', onclick: () => State.set({ ui: { ...S().ui, editingMsgId: m.id, msgActionOpen: null } }) }), btn('', { icon: 'trash-2', kind: 'danger', title: 'Delete', onclick: () => deleteMessageAndAfter(s.currentProject.id, m.id) }) ]) : null;
+        let editBox = null;
+        if (isEd) {
+          const inp = el('textarea', { class: 'w-full rounded-lg border p-2 text-sm text-neutral-900', rows: '2' }); inp.value = m.content;
+          editBox = el('div', { class: 'w-full' }, [ inp, el('div', { class: 'mt-1 flex justify-end gap-2' }, [ btn('Cancel', { onclick: () => State.set({ ui: { ...S().ui, editingMsgId: null } }) }), btn('Save', { kind: 'primary', onclick: () => { const v = inp.value; deleteMessageAndAfter(s.currentProject.id, m.id).then(() => Bus.emit('chat:send', v)); } }) ]) ]);
+        }
+        return el('div', { class: 'flex flex-col' }, [ el('div', { class: 'flex justify-end' }, [ isEd ? editBox : el('div', { ...evts, class: 'max-w-[85%] rounded-2xl bg-neutral-900 px-3 py-2 text-sm text-white text-left cursor-pointer transition active:scale-[0.98]', text: m.content }) ]), actRow ]);
+      })(),
       el('div', { class: 'flex flex-col gap-0.5 px-2 mt-1' }, cLogs.map((l, i) => el('span', { class: 'text-xs ' + (i === cLogs.length - 1 && !related && !errorText ? 'text-neutral-900 animate-pulse' : 'text-neutral-500'), text: l }))),
       errorText ? errorBox(errorText, () => Bus.emit('chat:send', m.content)) : null,
-      related ? el('button', { type: 'button', class: 'mt-1 flex w-full items-center gap-2 text-left text-sm', onclick: () => State.set({ ui: { ...S().ui, expandedFeedItems: { ...S().ui.expandedFeedItems, [m.id]: !open } } }) }, [icon('sparkles', 'h-4 w-4'), el('span', { class: 'flex-1 font-semibold', text: m.content.slice(0, 42) }), el('span', { class: 'text-xs text-neutral-500', text: 'View cuts' }), icon(open ? 'chevron-up' : 'chevron-down', 'h-4 w-4')]) : null,
-      open && ids.length ? el('div', { class: 'border-t border-neutral-100 pt-3' }, [VersionsPanel()]) : null,
+      related ? el('button', { type: 'button', class: 'mt-1 flex w-full items-center gap-2 text-left text-sm', onclick: () => State.set({ ui: { ...S().ui, cutsSheetOpenForMessageId: m.id } }) }, [icon('columns-2', 'h-4 w-4'), el('span', { class: 'flex-1 font-semibold', text: m.content.slice(0, 42) }), el('span', { class: 'text-xs text-neutral-500', text: 'View cuts' }), icon('chevron-right', 'h-4 w-4')]) : null,
     ]));
   });
   if (!feed.length) return el('div', { class: 'hidden' });
@@ -1340,16 +1382,21 @@ function VideoPanel() {
   videoEl = el('video', { src: videoURL, poster: 'data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'640\' height=\'360\'%3E%3Crect width=\'100%25\' height=\'100%25\' fill=\'%23252525\'/%3E%3C/svg%3E', class: 'w-full rounded-lg bg-neutral-900 aspect-video', playsinline: true, disablePictureInPicture: true, controlsList: 'nodownload nofullscreen noremoteplayback' });
   const time = el('span', { class: 'text-xs tabular-nums text-neutral-500', text: '00:00 / ' + fmt(s.currentVideoAsset.duration) });
   const bar = el('input', { type: 'range', min: '0', max: String(Math.max(1, s.currentVideoAsset.duration)), step: '0.01', value: '0', class: 'flex-1 accent-neutral-900' });
-  const hasRemovals = s.activeVersionId && (s.editSegmentsByVersion[s.activeVersionId] || []).some(e => e.action === 'remove');
-  const play = btn('', { icon: 'play', title: 'Play/pause', onclick: () => { if (!videoEl.paused) { videoEl.pause(); } else if (hasRemovals) { previewVersion(s.activeVersionId); } else { videoEl.play().catch(() => {}); } } });
-  videoEl.addEventListener("timeupdate", () => {
+  const ranges = s.activeVersionId ? keptRanges(s.activeVersionId) : [];
+  const editedDur = ranges.reduce((n, r) => n + (r.end - r.start), 0);
+  const totalDur = s.transcript.length ? s.transcript[s.transcript.length - 1].end : (s.currentVideoAsset.duration || 1);
+  const hasRemovals = editedDur > 0 && editedDur < totalDur - 0.1;
+  const play = btn('', { icon: 'play', title: 'Play/pause', onclick: () => { if (!videoEl.paused) { videoEl.pause(); } else if (hasRemovals) { previewVersion(s.activeVersionId); } else { isPreviewMode = false; videoEl.play().catch(() => {}); } } });  videoEl.addEventListener('timeupdate', () => {
     bar.value = String(videoEl.currentTime);
-    time.textContent = fmt(videoEl.currentTime) + " / " + fmt(videoEl.duration || s.currentVideoAsset.duration);
+    if (isPreviewMode && s.activeVersionId) {
+      let elapsed = 0;
+      for (const r of ranges) { if (videoEl.currentTime > r.end) elapsed += (r.end - r.start); else if (videoEl.currentTime >= r.start) elapsed += (videoEl.currentTime - r.start); }
+      time.textContent = fmt(elapsed) + ' / ' + fmt(editedDur);
+    } else { time.textContent = fmt(videoEl.currentTime) + ' / ' + fmt(videoEl.duration || s.currentVideoAsset.duration); }
     highlightActiveSegment(videoEl.currentTime);
-  });
-  videoEl.addEventListener("play", () => { play.replaceChildren(icon("pause")); refreshIcons(); });
-  videoEl.addEventListener("pause", () => { play.replaceChildren(icon("play")); refreshIcons(); });
-  bar.addEventListener("input", () => { videoEl.currentTime = Number(bar.value); });  const fileInput = el('input', { type: 'file', accept: 'video/*', class: 'hidden', onchange: (e) => { const f = e.target.files[0]; if (f) Bus.emit('video:replace', f); } });
+  });  videoEl.addEventListener('play', () => { play.replaceChildren(icon('pause')); refreshIcons(); });
+  videoEl.addEventListener('pause', () => { play.replaceChildren(icon('play')); refreshIcons(); isPreviewMode = false; });
+  bar.addEventListener('input', () => { isPreviewMode = false; videoEl.currentTime = Number(bar.value); });  const fileInput = el('input', { type: 'file', accept: 'video/*', class: 'hidden', onchange: (e) => { const f = e.target.files[0]; if (f) Bus.emit('video:replace', f); } });
   return el('div', {}, [
     videoEl,
     el('div', { class: 'mt-2 flex items-center gap-2' }, [play, bar, time, hasRemovals ? el('span', { class: 'text-[10px] font-medium text-neutral-500 bg-neutral-100 px-1.5 py-0.5 rounded', text: 'Playing edited version' }) : null]),
@@ -1455,19 +1502,21 @@ function VersionsPanel() {
   ], [el("div", { class: s.ui.compare ? "grid gap-3 sm:grid-cols-2" : "flex flex-col gap-3" }, rows)]);
 }
 let previewTimer = null;
+let isPreviewMode = false;
 function previewVersion(versionId) {
   if (!videoEl) return;
   const ranges = keptRanges(versionId);
-  if (!ranges.length) { toast("This version keeps nothing to preview.", "info"); return; }
+  if (!ranges.length) { toast('This version keeps nothing to preview.', 'info'); return; }
+  isPreviewMode = true;
   clearInterval(previewTimer);
   let i = 0;
   videoEl.currentTime = ranges[0].start;
   videoEl.play().catch(() => {});
   previewTimer = setInterval(() => {
-    if (!videoEl || videoEl.paused) return;
+    if (!videoEl || videoEl.paused) { isPreviewMode = false; clearInterval(previewTimer); return; }
     if (videoEl.currentTime >= ranges[i].end - 0.02) {
       i++;
-      if (i >= ranges.length) { videoEl.pause(); clearInterval(previewTimer); return; }
+      if (i >= ranges.length) { videoEl.pause(); clearInterval(previewTimer); isPreviewMode = false; return; }
       videoEl.currentTime = ranges[i].start;
     }
   }, 60);
