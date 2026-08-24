@@ -1349,7 +1349,7 @@ function TickingThoughtChip(startTime) {
   return node;
 }
 function AudioPipelineCard() {
-  const s = S(), open = !!s.ui.expandedFeedItems.transcript || !!s.ui.autoExpandTranscript;
+  const s = S(), pipeOpen = s.ui.pipelineExpanded !== false;
   const isBusy = !!s.processing.stage, isDone = !!s.transcript.length, isExt = s.processing.stage === 'extracting', isTr = s.processing.stage === 'transcribing';
   const st1 = isDone || isBusy ? 'done' : 'pending';
   const st2 = isDone || isTr ? 'done' : isExt ? 'active' : 'pending';
@@ -1359,19 +1359,20 @@ function AudioPipelineCard() {
     if (st === 'active') return el('div', { class: 'flex items-center gap-3 px-4 py-3 rounded-2xl bg-indigo-600 text-white shadow-lg shadow-indigo-200' }, [el('div', { class: 'w-8 h-8 rounded-xl bg-white/20 flex items-center justify-center shrink-0 animate-pulse' }, [icon(ic, 'w-4 h-4 text-white')]), el('span', { class: 'flex-1 text-sm font-black', text: activeLbl || lbl }), StepTimerBadge(s.processing.startedAt, 'text-xs font-black bg-white text-indigo-700 px-2.5 py-1 rounded-full tabular-nums')]);
     return el('div', { class: 'flex items-center gap-2.5 px-3 py-1.5 text-xs font-medium text-neutral-300' }, [icon(ic, 'w-3.5 h-3.5 text-neutral-300 shrink-0'), el('span', { class: 'flex-1', text: lbl }), el('span', { class: 'text-[11px]', text: 'up next' })]);
   };
-  const head = el('div', { class: 'flex items-center justify-between pb-3 border-b-2 border-indigo-50 mb-3.5' }, [
-    el('div', { class: 'flex items-center gap-2' }, [el('div', { class: 'w-3 h-3 rounded-full bg-indigo-600 ' + (isBusy ? 'animate-bounce' : '') }), el('span', { class: 'text-xs font-black tracking-wide text-indigo-950', text: '✨ Magic Auto-Cutter' })]),
+  const head = el('div', { class: 'flex items-center justify-between pb-3 border-b border-neutral-100 mb-3.5' }, [
+    el('div', { class: 'flex items-center gap-2' }, [icon('columns-2', 'w-4 h-4 text-neutral-900 shrink-0'), el('span', { class: 'text-xs font-black tracking-wide text-neutral-950', text: 'Clippi AI Studio' })]),
     el('div', { class: 'flex items-center gap-1.5' }, [
-      isBusy ? btn('Stop', { icon: 'square', class: 'rounded-2xl text-xs font-black bg-red-50 hover:bg-red-100 text-red-700 border-none px-3 py-1.5 active:scale-90', onclick: () => { Media.cancel(); State.set({ processing: { stage: null, progress: 0, engine: null, message: '', gesturePrompt: false }, errors: { ...S().errors, transcribe: 'Transcription cancelled. Retry when ready.' } }); } }) : btn(isDone ? 'Restart' : 'Start', { icon: 'rotate-cw', class: 'rounded-2xl text-xs font-black bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-none px-3 py-1.5 active:scale-90', onclick: () => runTranscription() }),
-      el('button', { type: 'button', title: 'Toggle transcript', class: 'p-1 rounded-xl text-neutral-400 hover:text-neutral-700', onclick: () => State.set({ ui: { ...S().ui, expandedFeedItems: { ...S().ui.expandedFeedItems, transcript: !open } } }) }, [icon(open ? 'chevron-up' : 'chevron-down', 'w-4 h-4')])
+      isBusy ? btn('Stop', { icon: 'square', class: 'rounded-2xl text-xs font-black bg-red-50 hover:bg-red-100 text-red-700 border-none px-3 py-1.5 active:scale-90', onclick: () => { Media.cancel(); State.set({ processing: { stage: null, progress: 0, engine: null, message: '', gesturePrompt: false }, errors: { ...S().errors, transcribe: 'Transcription cancelled. Retry when ready.' } }); } }) : btn(isDone ? 'Restart' : 'Start', { icon: 'rotate-cw', class: 'rounded-2xl text-xs font-black bg-neutral-100 hover:bg-neutral-200 text-neutral-800 border-none px-3 py-1.5 active:scale-90', onclick: () => runTranscription() }),
+      el('button', { type: 'button', title: 'Toggle pipeline', class: 'p-1 rounded-xl text-neutral-400 hover:text-neutral-700', onclick: () => State.set({ ui: { ...S().ui, pipelineExpanded: !pipeOpen } }) }, [icon(pipeOpen ? 'chevron-up' : 'chevron-down', 'w-4 h-4')])
     ])
   ]);
-  const rows = [pRow('audio-waveform', 'Audio checked', st1, '1s', 'Check audio'), pRow('music', 'Audio extracted', st2, 'done', 'Extract audio'), pRow('file-text', 'Transcribed — ' + s.transcript.length + ' segments generated', st3, 'ready', 'Transcript script')];
-  return el('div', { class: 'rounded-3xl border-2 border-indigo-100 bg-white p-4 sm:p-5 shadow-[0_8px_30px_rgb(99,102,241,0.08)] text-neutral-800' }, [
-    head, el('div', { class: 'space-y-2.5 mb-2' }, rows),
+  const allRows = [pRow('audio-waveform', 'Audio checked', st1, '1s', 'Check audio'), pRow('music', 'Audio extracted', st2, 'done', 'Extract audio'), pRow('file-text', 'Transcribed — ' + s.transcript.length + ' segments generated', st3, 'ready', 'Transcript script')];
+  const activeIdx = st3 === 'active' || isDone ? 2 : st2 === 'active' ? 1 : 0;
+  const displayedRows = pipeOpen ? allRows : [allRows[activeIdx]];
+  return el('div', { class: 'rounded-xl border border-neutral-200 bg-transparent p-4 text-neutral-800' }, [
+    head, el('div', { class: 'space-y-2.5 mb-2' }, displayedRows),
     s.processing.gesturePrompt ? el('div', { class: 'mt-3 rounded-2xl border-2 border-indigo-200 bg-indigo-50 p-3' }, [btn('Tap to start audio processing', { kind: 'primary', icon: 'play', class: 'w-full justify-center rounded-2xl font-black text-xs', onclick: () => runTranscription() })]) : null,
-    s.errors.transcribe ? el('div', { class: 'mt-3' }, [errorBox(s.errors.transcribe, () => runTranscription())]) : null,
-    open && !isBusy && !s.errors.transcribe ? el('div', { class: 'border-t-2 border-indigo-50 pt-3 mt-3' }, [TranscriptPanel()]) : null
+    s.errors.transcribe ? el('div', { class: 'mt-3' }, [errorBox(s.errors.transcribe, () => runTranscription())]) : null
   ]);
 }
 
@@ -1397,11 +1398,11 @@ function ChatFeedItem(m) {
   const steps = [{ lbl: 'Analyzing instruction', ic: 'sparkles' }, { lbl: 'Generating cut versions', ic: 'scissors' }, { lbl: 'Edit generation complete', ic: 'check-circle-2' }];
   const logRows = steps.map((st, i) => {
     if (related) return el('div', { class: 'flex items-center gap-2.5 px-3.5 py-1.5 rounded-2xl bg-neutral-50 text-xs font-medium text-neutral-500' }, [icon('check', 'w-3.5 h-3.5 text-indigo-600 shrink-0'), el('span', { class: 'flex-1 truncate', text: st.lbl }), el('span', { class: 'text-[11px] font-bold text-neutral-400 tabular-nums', text: 'done' })]);
-    if (isBusy && i === 1) return el('div', { class: 'flex items-center gap-3 px-4 py-2.5 rounded-2xl bg-amber-400 text-neutral-950 font-black text-xs shadow-md' }, [icon('scissors', 'w-4 h-4 text-neutral-950 animate-pulse'), el('span', { class: 'flex-1', text: st.lbl }), StepTimerBadge(m.createdAt, 'bg-neutral-950 text-white px-2 py-0.5 rounded-full tabular-nums')]);
+    if (isBusy && i === 1) return el('div', { class: 'flex items-center gap-3 px-4 py-2.5 rounded-2xl bg-white border-2 border-neutral-950 text-neutral-950 font-black text-xs shadow-sm' }, [icon('scissors', 'w-4 h-4 text-neutral-950 animate-pulse'), el('span', { class: 'flex-1', text: st.lbl }), StepTimerBadge(m.createdAt, 'bg-neutral-950 text-white px-2 py-0.5 rounded-full tabular-nums')]);
     if (isBusy && i === 0) return el('div', { class: 'flex items-center gap-2.5 px-3.5 py-1.5 rounded-2xl bg-neutral-50 text-xs font-medium text-neutral-500' }, [icon('check', 'w-3.5 h-3.5 text-indigo-600 shrink-0'), el('span', { class: 'flex-1 truncate', text: st.lbl }), el('span', { class: 'text-[11px] font-bold text-neutral-400 tabular-nums', text: 'done' })]);
     return null;
   }).filter(Boolean);
-  const resultCard = related ? el('button', { type: 'button', class: 'mt-1 flex w-full items-center justify-between gap-3 rounded-2xl bg-indigo-950 p-4 text-white shadow-md hover:bg-neutral-900 transition active:scale-[0.99]', onclick: () => State.set({ ui: { ...S().ui, cutsSheetOpenForMessageId: m.id } }) }, [el('div', { class: 'flex items-center gap-2.5 min-w-0' }, [icon('columns-2', 'w-4 h-4 text-amber-400 shrink-0'), el('p', { class: 'text-xs font-black truncate', text: m.content.slice(0, 42) })]), el('span', { class: 'inline-flex items-center gap-0.5 text-xs font-black text-amber-400 hover:underline shrink-0' }, [el('span', { text: 'View cuts' }), icon('chevron-right', 'w-4 h-4')])]) : null;
+  const resultCard = related ? el('button', { type: 'button', class: 'mt-1 flex w-full items-center justify-between gap-3 rounded-2xl bg-neutral-950 p-4 text-white shadow-md hover:bg-neutral-900 transition active:scale-[0.99]', onclick: () => State.set({ ui: { ...S().ui, cutsSheetOpenForMessageId: m.id } }) }, [el('div', { class: 'flex items-center gap-2.5 min-w-0' }, [icon('columns-2', 'w-4 h-4 text-white shrink-0'), el('p', { class: 'text-xs font-black truncate', text: m.content.slice(0, 42) })]), el('span', { class: 'inline-flex items-center gap-0.5 text-xs font-black text-white hover:underline shrink-0' }, [el('span', { text: 'View cuts' }), icon('chevron-right', 'w-4 h-4')])]) : null;
   return el('div', { class: 'py-2 flex flex-col gap-2.5' }, [userBubble, el('div', { class: 'space-y-2' }, logRows), errorText ? errorBox(errorText, () => Bus.emit('chat:send', m.content)) : null, resultCard]);
 }
 
@@ -1411,6 +1412,7 @@ function ChatFeedItem(m) {
 function ActivityFeed() {
   const s = S(), feed = [];
   if (s.currentVideoAsset) feed.push(AudioPipelineCard());
+  if (s.transcript.length) feed.push(TranscriptPanel());
   s.chatMessages.filter((m) => m.role === 'user').forEach((m) => feed.push(ChatFeedItem(m)));
   if (!feed.length) return el('div', { class: 'hidden' });
   return el('div', { class: 'flex flex-col gap-3 pb-36' }, feed);
