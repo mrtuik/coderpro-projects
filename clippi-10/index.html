@@ -1,0 +1,1927 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Clippi v2.7 — Transcript-first AI video editor</title>
+<meta name="description" content="Clippi turns a natural-language instruction into a real editable cut. Upload a video, get a timestamped transcript, edit by text or by chat, export locally." />
+<meta property="og:title" content="Clippi — Transcript-first AI video editor" />
+<meta property="og:description" content="Upload a video, get a timestamped transcript, describe your edit, compare two AI cuts, export in-browser." />
+<meta property="og:type" content="website" />
+<meta name="twitter:card" content="summary_large_image" />
+<link rel="icon" href="/favicon.ico" type="image/x-icon" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>
+  :root { color-scheme: light; }
+  html, body { height: 100%; }
+  body { background:#f7f7f6; color:#1c1c1a; -webkit-font-smoothing:antialiased; }
+  ::-webkit-scrollbar { width:8px; height:8px }
+  ::-webkit-scrollbar-thumb { background:#d8d8d4; border-radius:8px }
+  [data-lucide] { width:1em; height:1em }
+  .seg-active { background:#eef3ff; border-color:#c7d6ff }
+  mark { background:#fde68a; color:inherit; border-radius:2px }
+  .v58-range { -webkit-appearance:none; appearance:none; background:transparent; cursor:pointer }
+  .v58-range::-webkit-slider-thumb { -webkit-appearance:none; height:12px; width:12px; background:#fff; border:2px solid #18181b; border-radius:9999px; box-shadow:0 1px 2px rgba(0,0,0,0.05) }
+</style>
+</head>
+<body class="h-full">
+<div id="app" class="min-h-full"></div>
+
+<script type="module">
+import { FFmpeg } from "https://esm.sh/@ffmpeg/ffmpeg@0.12.10";
+import { toBlobURL } from "https://esm.sh/@ffmpeg/util@0.12.1";
+
+/* ============================ UTIL ============================ */
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "id-" + Math.random().toString(36).slice(2) + Date.now());
+const now = () => Date.now();
+const fmt = (s) => {
+  if (!isFinite(s) || s < 0) s = 0;
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
+  return (h ? String(h).padStart(2, "0") + ":" : "") + String(m).padStart(2, "0") + ":" + String(sec).padStart(2, "0");
+};
+const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+
+function el(tag, props = {}, children = []) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === "class") n.className = v;
+    else if (k === "text") n.textContent = v;
+    else if (k === "html") throw new Error("html not allowed");
+    else if (k.startsWith("on") && typeof v === "function") n.addEventListener(k.slice(2).toLowerCase(), v);
+    else if (k === "value") n.value = v;
+    else if (k === "checked") n.checked = !!v;
+    else n.setAttribute(k, v === true ? "" : String(v));
+  }
+  for (const c of [].concat(children)) {
+    if (c === null || c === undefined || c === false) continue;
+    n.appendChild(typeof c === "string" || typeof c === "number" ? document.createTextNode(String(c)) : c);
+  }
+  return n;
+}
+const icon = (name, cls = "") => el("i", { "data-lucide": name, class: cls });
+function refreshIcons() { try { window.lucide && window.lucide.createIcons(); } catch (e) { /* icons optional */ } }
+
+const btn = (label, opts = {}) => {
+  const kind = opts.kind || "ghost";
+  const map = {
+    primary: "bg-neutral-900 text-white border-neutral-900 hover:bg-neutral-800",
+    ghost: "bg-white text-neutral-800 border-neutral-200 hover:bg-neutral-50",
+    danger: "bg-white text-red-600 border-red-200 hover:bg-red-50",
+    subtle: "bg-neutral-100 text-neutral-700 border-transparent hover:bg-neutral-200",
+  };
+  const b = el("button", {
+    type: "button",
+    class: `inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-sm font-medium shadow-sm transition disabled:opacity-40 disabled:cursor-not-allowed ${map[kind]} ${opts.class || ""}`,
+    onclick: opts.onclick, title: opts.title, disabled: opts.disabled,
+  }, [opts.icon ? icon(opts.icon) : null, label ? el("span", { text: label }) : null]);
+  return b;
+};
+
+/* ============================ STORAGE MODULE ============================ */
+const DB_NAME = "ClippiDB", DB_VERSION = 1;
+const STORES = {
+  projects: { key: "id", idx: [["updatedAt", "updatedAt"], ["status", "status"]] },
+  videoAssets: { key: "id", idx: [["projectId", "projectId"]] },
+  transcriptSegments: { key: "id", idx: [["projectId", "projectId"], ["videoAssetId", "videoAssetId"]] },
+  editVersions: { key: "id", idx: [["projectId", "projectId"]] },
+  editSegments: { key: "id", idx: [["editVersionId", "editVersionId"]] },
+  chatMessages: { key: "id", idx: [["projectId", "projectId"]] },
+  editHistory: { key: "id", idx: [["projectId", "projectId"]] },
+  appSettings: { key: "key", idx: [] },
+};
+
+let _db = null;
+function openDB() {
+  if (_db) return Promise.resolve(_db);
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      for (const [name, cfg] of Object.entries(STORES)) {
+        const store = db.objectStoreNames.contains(name) ? req.transaction.objectStore(name) : db.createObjectStore(name, { keyPath: cfg.key });
+        for (const [iname, path] of cfg.idx) if (!store.indexNames.contains(iname)) store.createIndex(iname, path);
+      }
+    };
+    req.onsuccess = () => { _db = req.result; _db.onversionchange = () => _db.close(); resolve(_db); };
+    req.onerror = () => reject(dbErr(req.error));
+  });
+}
+function dbErr(e) {
+  const name = (e && e.name) || "";
+  if (name === "QuotaExceededError") return new Error("Storage limit reached. Delete an old project to free space, then retry.");
+  return new Error("Local database error: " + (e && e.message ? e.message : "unknown") + ".");
+}
+function tx(stores, mode) { return openDB().then((db) => db.transaction(stores, mode)); }
+function wrap(req) { return new Promise((res, rej) => { req.onsuccess = () => res(req.result); req.onerror = () => rej(dbErr(req.error)); }); }
+
+async function addRecord(store, rec) { const t = await tx([store], "readwrite"); await wrap(t.objectStore(store).put(rec)); return rec; }
+async function updateRecord(store, rec) { return addRecord(store, rec); }
+async function getRecord(store, key) { const t = await tx([store], "readonly"); return wrap(t.objectStore(store).get(key)); }
+async function getAll(store) { const t = await tx([store], "readonly"); return wrap(t.objectStore(store).getAll()); }
+async function getAllByIndex(store, index, value) {
+  const t = await tx([store], "readonly");
+  return wrap(t.objectStore(store).index(index).getAll(value));
+}
+async function deleteRecord(store, key) { const t = await tx([store], "readwrite"); return wrap(t.objectStore(store).delete(key)); }
+function runTransaction(stores, fn) {
+  return openDB().then((db) => new Promise((resolve, reject) => {
+    const t = db.transaction(stores, "readwrite");
+    let out;
+    t.oncomplete = () => resolve(out);
+    t.onerror = () => reject(dbErr(t.error));
+    t.onabort = () => reject(dbErr(t.error));
+    const api = {
+      put: (s, rec) => t.objectStore(s).put(rec),
+      del: (s, k) => t.objectStore(s).delete(k),
+      byIndex: (s, i, v) => wrap(t.objectStore(s).index(i).getAll(v)),
+    };
+    Promise.resolve(fn(api)).then((r) => { out = r; }).catch((e) => { try { t.abort(); } catch (_) {} reject(e); });
+  }));
+}
+
+/* ============================ STATE MANAGER ============================ */
+const State = {
+  data: {
+    screen: "home",
+    projects: [],
+    stats: { projects: 0, minutes: 0, storage: null },
+    currentProject: null,
+    currentVideoAsset: null,
+    transcript: [],
+    editVersions: [],
+    activeVersionId: null,
+    editSegmentsByVersion: {},
+    chatMessages: [],
+    selectedSegmentIds: [],
+    playback: { currentTime: 0, duration: 0, isPlaying: false },
+    processing: { stage: null, progress: 0, engine: null, message: '', gesturePrompt: false },
+    exportState: { status: "idle", progress: 0, url: null },
+    settings: null,
+    history: { undoStack: [], redoStack: [] },
+    errors: {},
+    search: { q: "", matches: [], cursor: 0 },     ui: { renamingId: null, confirmDeleteId: null, confirmDeleteVersionId: null, compare: false, chatBusy: false, chatErrors: {}, feedLogs: {}, modelProgress: null, mediaBarExpanded: false, autoExpandTranscript: false, homeTab: 'home', homeCreateOpen: false, homeNewMenuOpen: false, expandedFeedItems: {}, crossOriginWarning: false, transcriptViewMode: 'lines', renderResolution: '1080p (FHD)', renderResDropdownOpen: false },
+  },
+  subs: new Map(),
+  subscribe(keys, fn) { const id = uid(); this.subs.set(id, { keys, fn }); return id; },
+  set(patch) {
+    Object.assign(this.data, patch);
+    const keys = new Set(Object.keys(patch));
+    for (const { keys: k, fn } of this.subs.values()) if (k === "*" || k.some((x) => keys.has(x))) fn(this.data);
+    refreshIcons();
+  },
+};
+const S = () => State.data;
+
+/* ============================ EVENT BUS ============================ */
+const Bus = {
+  map: new Map(),
+  on(evt, fn) { if (!this.map.has(evt)) this.map.set(evt, []); this.map.get(evt).push(fn); },
+  async emit(evt, payload) {
+    const list = this.map.get(evt) || [];
+    for (const fn of list) { try { await fn(payload); } catch (e) { console.error(evt, e); toast(e.message || String(e), "error"); } }
+  },
+};
+
+/* ============================ TOASTS (inline, non-modal) ============================ */
+const toastHost = el("div", { class: "fixed bottom-4 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 w-[min(92vw,26rem)]" });
+document.body.appendChild(toastHost);
+function toast(msg, kind = "info") {
+  const colors = { info: "border-neutral-200 bg-white text-neutral-800", error: "border-red-200 bg-red-50 text-red-700", ok: "border-emerald-200 bg-emerald-50 text-emerald-800" };
+  const t = el("div", { class: `flex items-start gap-2 rounded-xl border px-3 py-2 text-sm shadow-sm ${colors[kind]}` }, [
+    icon(kind === "error" ? "alert-triangle" : kind === "ok" ? "check-circle-2" : "info", "mt-0.5 shrink-0"),
+    el("span", { class: "flex-1", text: msg }),
+  ]);
+  toastHost.appendChild(t); refreshIcons();
+  setTimeout(() => t.remove(), 6000);
+}
+
+/* ============================ SETTINGS ============================ */
+const DEFAULT_SETTINGS = {
+  key: "global", transcriptionEngine: "wasm", cloudProvider: null, cloudApiKey: "",
+  preferredModelSize: "base", theme: "light", llmProvider: "openai", llmApiKey: "", llmModel: "",
+};
+async function loadSettings() {
+  let s = await getRecord("appSettings", "global");
+  if (!s) { s = { ...DEFAULT_SETTINGS, transcriptionEngine: (await hasWebGPU()) ? "webgpu" : "wasm" }; await addRecord("appSettings", s); }
+  return { ...DEFAULT_SETTINGS, ...s };
+}
+async function hasWebGPU() {
+  try { if (!navigator.gpu) return false; const a = await navigator.gpu.requestAdapter(); return !!a; } catch (e) { return false; }
+}
+
+/* ============================ MEDIA MODULE (ffmpeg.wasm) ============================ */
+const Media = {
+  ff: null, loading: null, cancelled: false, nativeCapture: null,
+  async load(onLog) {
+    if (this.ff) return this.ff;
+    if (this.loading) return this.loading;
+    this.loading = (async () => {
+      const base = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd";
+      const ff = new FFmpeg();
+      ff.on("log", ({ message }) => onLog && onLog(message));
+      await withTimeout(ff.load({
+        coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, "text/javascript"),        wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'),
+        classWorkerURL: await toBlobURL('https://esm.sh/@ffmpeg/ffmpeg@0.12.10/es2022/worker.js', 'text/javascript'),
+      }), 90000);
+      this.ff = ff; return ff;
+    })().catch((e) => { this.loading = null; throw e; });
+    return this.loading;
+  },
+  async extractAudioNative(blob, onProgress) {
+    this.cancelled = false;
+    const url = URL.createObjectURL(blob);
+    const video = document.createElement("video");
+    video.src = url; video.playsInline = true; video.preload = "auto";
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = ctx.createMediaElementSource(video);
+    const processor = ctx.createScriptProcessor(4096, 2, 1);
+    const gain = ctx.createGain(); gain.gain.value = 0;
+    const chunks = [];
+    let settled = false;
+    let resolveCapture, rejectCapture;
+    const promise = new Promise((resolve, reject) => { resolveCapture = resolve; rejectCapture = reject; });
+    const cleanup = () => {
+      if (settled) return;
+      settled = true; this.nativeCapture = null;
+      try { video.pause(); processor.disconnect(); source.disconnect(); gain.disconnect(); ctx.close(); } catch (_) {}
+      URL.revokeObjectURL(url);
+    };
+    const cancel = () => { cleanup(); rejectCapture(new Error("Cancelled")); };
+    this.nativeCapture = { cancel, video };
+    processor.onaudioprocess = (event) => {
+      const input = event.inputBuffer;
+      const length = input.length, channels = input.numberOfChannels;
+      const mono = new Float32Array(length);
+      for (let i = 0; i < length; i++) {
+        let total = 0;
+        for (let c = 0; c < channels; c++) total += input.getChannelData(c)[i] || 0;
+        mono[i] = total / Math.max(1, channels);
+      }
+      chunks.push(mono);
+    };
+    video.ontimeupdate = () => onProgress && onProgress(video.duration ? Math.min(1, video.currentTime / video.duration) : 0);
+    video.onerror = () => { cleanup(); rejectCapture(new Error("Could not read audio from this video file. Try a different video format (mp4/webm) or browser, then retry.")); };
+    video.onended = () => {
+      const total = chunks.reduce((n, c) => n + c.length, 0), input = new Float32Array(total);
+      let offset = 0; chunks.forEach((c) => { input.set(c, offset); offset += c.length; });
+      const outputLength = Math.max(1, Math.round(input.length * 16000 / ctx.sampleRate));
+      const output = new Float32Array(outputLength);
+      for (let i = 0; i < outputLength; i++) {
+        const pos = i * (input.length - 1) / Math.max(1, outputLength - 1), left = Math.floor(pos), right = Math.min(input.length - 1, left + 1), frac = pos - left;
+        output[i] = (input[left] || 0) * (1 - frac) + (input[right] || 0) * frac;
+      }
+      cleanup(); resolveCapture(output);
+    };
+    source.connect(processor); processor.connect(gain); gain.connect(ctx.destination);
+    let watchdog = setTimeout(() => {
+      if (!video.currentTime && !settled) {
+        cleanup();
+        const err = new Error('GestureRequired');
+        err.name = 'GestureRequired';
+        rejectCapture(err);
+      }
+    }, 6000);
+    Promise.all([ctx.resume(), video.play()]).catch((e) => {
+      if (settled) return;
+      clearTimeout(watchdog);
+      cleanup();
+      const err = new Error('GestureRequired');
+      err.name = 'GestureRequired';
+      rejectCapture(err);
+    });
+    promise.finally(() => clearTimeout(watchdog));
+    return promise;
+  },
+  async renderCut(blob, ranges, onProgress) {
+    const ff = await withTimeout(this.load(), 90000);
+    const totalDur = ranges.reduce((n, r) => n + (r.end - r.start), 0);
+    const execTimeout = renderTimeoutMs(totalDur, ranges.length);
+    const inName = "src_" + uid().slice(0, 8) + ".mp4";
+    const outName = "out_" + uid().slice(0, 8) + ".mp4";
+    const written = [];
+    const cleanup = async () => { for (const n of written) { try { await ff.deleteFile(n); } catch (_) {} } };
+    try {
+      await ff.writeFile(inName, new Uint8Array(await blob.arrayBuffer()));
+      written.push(inName);
+      // Render one batch of kept ranges through a trim/concat filter graph.
+      const runGroup = async (group, groupOut, report) => {
+        const parts = [];
+        group.forEach((r, i) => {
+          parts.push(`[0:v]trim=start=${r.start.toFixed(3)}:end=${r.end.toFixed(3)},setpts=PTS-STARTPTS[v${i}]`);
+          parts.push(`[0:a]atrim=start=${r.start.toFixed(3)}:end=${r.end.toFixed(3)},asetpts=PTS-STARTPTS[a${i}]`);
+        });
+        const concat = group.map((_, i) => `[v${i}][a${i}]`).join("") + `concat=n=${group.length}:v=1:a=1[vout][aout]`;
+        const filter = parts.join(";") + ";" + concat;
+        const prog = ({ progress }) => report(Math.max(0, Math.min(1, progress || 0)));
+        ff.on("progress", prog);
+        try {
+          await withTimeout(ff.exec(["-i", inName, "-filter_complex", filter, "-map", "[vout]", "-map", "[aout]",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", "-c:a", "aac", "-movflags", "+faststart", groupOut]), execTimeout);
+        } finally { ff.off("progress", prog); }
+        written.push(groupOut);
+      };
+      const MAX_GROUP = 20;
+      if (ranges.length <= MAX_GROUP) {
+        await runGroup(ranges, outName, (p) => onProgress && onProgress(p));
+      } else {
+        // Many cuts: a single giant filter graph can exhaust wasm memory, so render
+        // in batches of MAX_GROUP and join the parts with the concat demuxer.
+        const groups = [];
+        for (let i = 0; i < ranges.length; i += MAX_GROUP) groups.push(ranges.slice(i, i + MAX_GROUP));
+        const partNames = [];
+        for (let gi = 0; gi < groups.length; gi++) {
+          const pn = "part_" + uid().slice(0, 8) + "_" + gi + ".mp4";
+          await runGroup(groups[gi], pn, (p) => onProgress && onProgress((gi + p * 0.9) / groups.length));
+          partNames.push(pn);
+        }
+        const listName = "concat_" + uid().slice(0, 8) + ".txt";
+        await ff.writeFile(listName, partNames.map((p) => "file '" + p + "'").join("\n"));
+        written.push(listName);
+        await withTimeout(ff.exec(["-f", "concat", "-safe", "0", "-i", listName, "-c", "copy", "-movflags", "+faststart", outName]), execTimeout);
+        written.push(outName);
+      }
+      const data = await ff.readFile(outName);
+      await cleanup();
+      return new Blob([data.buffer], { type: "video/mp4" });
+    } catch (e) { await cleanup(); throw e; }
+  },
+  cancel() { try { this.nativeCapture && this.nativeCapture.cancel(); } catch (e) {} try { this.ff && this.ff.terminate(); } catch (e) {} this.ff = null; this.loading = null; },
+};
+
+async function decodeToMono16k(wavBlob) {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC({ sampleRate: 16000 });
+  const buf = await ctx.decodeAudioData(await wavBlob.arrayBuffer());
+  const data = buf.getChannelData(0).slice();
+  ctx.close();
+  return data;
+}
+
+/* ============================ TRANSCRIPTION MODULE ============================ */
+let transformersMod = null;
+async function loadTransformers() {
+  if (!transformersMod) transformersMod = await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.1");
+  return transformersMod;
+}
+const MODEL_BY_SIZE = { tiny: "onnx-community/whisper-tiny.en", base: "onnx-community/whisper-base", small: "onnx-community/whisper-small" };
+const pipelineCache = new Map();
+
+class LocalWhisperEngine {
+  constructor(device, size) { this.device = device; this.size = size; this.name = device === "webgpu" ? "webgpu" : "wasm"; }
+  async getPipe(onProgress) {
+    const model = MODEL_BY_SIZE[this.size] || MODEL_BY_SIZE.base;
+    const cacheKey = this.device + "|" + model;
+    if (pipelineCache.has(cacheKey)) return pipelineCache.get(cacheKey);
+    const { pipeline, env } = await loadTransformers();
+    env.allowLocalModels = false;
+    env.useBrowserCache = true;
+    const p = await pipeline("automatic-speech-recognition", model, {
+      device: this.device,
+      dtype: this.device === "webgpu" ? { encoder_model: "fp16", decoder_model_merged: "q4" } : "q8",
+      progress_callback: (e) => {
+        if (e && e.status === "progress" && e.total) onProgress && onProgress(e.progress / 100, e.file);
+        if (e && e.status === "done") onProgress && onProgress(1, e.file);
+      },
+    });
+    pipelineCache.set(cacheKey, p);
+    return p;
+  }
+  async transcribe(audioBlob, hooks = {}) {
+    const pipe = await this.getPipe(hooks.onModel);
+    const audio = audioBlob instanceof Float32Array ? audioBlob : await decodeToMono16k(audioBlob);
+    hooks.onStage && hooks.onStage("Transcribing audio locally");
+    const out = await pipe(audio, { return_timestamps: "word", chunk_length_s: 30, stride_length_s: 5 });
+    const chunks = (out && out.chunks) || [];
+    const wordList = chunks.map((c) => ({ text: (c.text || "").trim(), start: Number(c.timestamp && c.timestamp[0]) || 0, end: Number(c.timestamp && c.timestamp[1]) || 0 })).filter((w) => w.text);
+    const segs = [];
+    if (wordList.length) {
+      let curWords = [wordList[0]];
+      for (let i = 1; i < wordList.length; i++) {
+        const prev = wordList[i - 1], w = wordList[i];
+        if (w.start - prev.end > 0.8 || curWords.length >= 14) {
+          segs.push({ start: curWords[0].start, end: prev.end, text: curWords.map(x => x.text).join(" "), words: curWords });
+          curWords = [w];
+        } else { curWords.push(w); }
+      }
+      if (curWords.length) segs.push({ start: curWords[0].start, end: curWords[curWords.length - 1].end, text: curWords.map(x => x.text).join(" "), words: curWords });
+    } else if (out && out.text) { segs.push({ start: 0, end: audio.length / 16000, text: out.text.trim(), words: [] }); }
+    return normalizeSegs(segs, audio.length / 16000);
+  }
+}
+class CloudWhisperEngine {
+  constructor(provider, apiKey) { this.provider = provider; this.apiKey = apiKey; this.name = "cloud"; }
+  async transcribe(audioBlob, hooks = {}) {
+    if (audioBlob instanceof Float32Array) audioBlob = floatToWavBlob(audioBlob, 16000);
+    hooks.onStage && hooks.onStage("Transcribing via " + this.provider);
+    const url = this.provider === "groq" ? "https://api.groq.com/openai/v1/audio/transcriptions" : "https://api.openai.com/v1/audio/transcriptions";
+    const model = this.provider === "groq" ? "whisper-large-v3" : "whisper-1";
+    const fd = new FormData();
+    fd.append("file", new File([audioBlob], "audio.wav", { type: "audio/wav" }));
+    fd.append("model", model);
+    fd.append("response_format", "verbose_json");
+    fd.append("timestamp_granularities[]", "segment");
+    fd.append("timestamp_granularities[]", "word");
+    const durSec = audioBlob instanceof Float32Array ? audioBlob.length / 16000 : 0;
+    const res = await withTimeout(fetch(url, { method: "POST", headers: { Authorization: "Bearer " + this.apiKey }, body: fd }), transcribeTimeoutMs(durSec));
+    if (!res.ok) throw new Error("Cloud transcription failed (" + res.status + "). Check your API key and try again.");
+    const json = await res.json();
+    const allWords = (json.words || []).map(w => ({ text: String(w.word || "").trim(), start: Number(w.start) || 0, end: Number(w.end) || 0 })).filter(w => w.text);
+    const segs = (json.segments || []).map((s) => {
+      const sStart = Number(s.start) || 0, sEnd = Number(s.end) || 0;
+      const segWords = allWords.filter(w => w.start >= sStart - 0.05 && w.end <= sEnd + 0.15);
+      return { start: sStart, end: sEnd, text: String(s.text || "").trim(), words: segWords };
+    }).filter((s) => s.text);
+    if (!segs.length && json.text) segs.push({ start: 0, end: 0, text: String(json.text), words: allWords });
+    return normalizeSegs(segs, 0);
+  }
+}
+function floatToWavBlob(samples, sampleRate) {
+  const buffer = new ArrayBuffer(44 + samples.length * 2), view = new DataView(buffer);
+  const write = (offset, text) => [...text].forEach((c, i) => view.setUint8(offset + i, c.charCodeAt(0)));
+  write(0, "RIFF"); view.setUint32(4, 36 + samples.length * 2, true); write(8, "WAVE"); write(12, "fmt ");
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true); write(36, "data"); view.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, samples[i])) * 0x7fff, true);
+  return new Blob([buffer], { type: "audio/wav" });
+}
+function normalizeSegs(segs, dur) {
+  segs.sort((a, b) => a.start - b.start);
+  return segs.map((s, i) => {
+    let end = s.end;
+    if (!end || end <= s.start) {
+      const est = s.start + Math.max(0.4, s.text.split(' ').length * 0.28);
+      const nextStart = segs[i + 1] ? segs[i + 1].start : (dur || s.start + 2);
+      end = Math.min(est, Math.max(s.start + 0.05, nextStart - 0.15));
+    }
+    return { start: +s.start.toFixed(3), end: +Math.max(end, s.start + 0.05).toFixed(3), text: s.text, words: s.words || [] };
+  });
+}
+async function resolveEngine() {
+  const st = S().settings;
+  let choice = st.transcriptionEngine;
+  if (choice === "cloud") {
+    if (!st.cloudApiKey || !st.cloudProvider) throw new Error("Cloud transcription selected but no API key is saved. Open Settings to add one.");
+    return new CloudWhisperEngine(st.cloudProvider, st.cloudApiKey);
+  }
+  if (choice === "webgpu" && !(await hasWebGPU())) {
+    Bus.emit("engine:fallback");
+    toast("WebGPU is not available in this browser — falling back to the WASM engine.", "info");
+    choice = "wasm";
+  }
+  return new LocalWhisperEngine(choice === "webgpu" ? "webgpu" : "wasm", st.preferredModelSize);
+}
+
+function withTimeout(promise, ms) {
+  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error("Request timed out. Check your connection and retry.")), ms))]);
+}
+/* Timeouts that scale with the media: longer/larger videos get proportionally more time. */
+function renderTimeoutMs(editedDurSec, cutCount) {
+  return Math.min(30 * 60 * 1000, Math.max(180000, Math.ceil(editedDurSec || 0) * 20000 + (cutCount || 0) * 5000));
+}
+function extractTimeoutMs(durSec, bytes) {
+  // Native extraction captures audio in real time, so it needs well over the video's duration.
+  const mb = (bytes || 0) / (1024 * 1024);
+  return Math.min(60 * 60 * 1000, Math.max(90000, Math.ceil(durSec || 0) * 2000 + Math.ceil(mb) * 500 + 30000));
+}
+function transcribeTimeoutMs(durSec) {
+  return Math.min(60 * 60 * 1000, Math.max(180000, Math.ceil(durSec || 0) * 10000));
+}
+function probeTimeoutMs(bytes) {
+  const mb = (bytes || 0) / (1024 * 1024);
+  return Math.min(120000, Math.max(15000, Math.ceil(mb) * 250));
+}
+
+/* ============================ AI EDIT MODULE ============================ */
+const AI = {
+  cfg() {
+    const st = S().settings;
+    const provider = st.llmProvider || "openai";
+    const key = st.llmApiKey || (st.cloudProvider === provider ? st.cloudApiKey : "");
+    if (!key) throw new Error("No AI key saved. Add your OpenAI or Groq key in Settings to generate cuts.");
+    const url = provider === "groq" ? "https://api.groq.com/openai/v1/chat/completions" : "https://api.openai.com/v1/chat/completions";
+    const model = st.llmModel || (provider === "groq" ? "llama-3.3-70b-versatile" : "gpt-4o-mini");
+    return { url, key, model };
+  },
+  async chat(messages, jsonMode = true) {
+    const { url, key, model } = this.cfg();
+    const res = await withTimeout(fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + key },
+      body: JSON.stringify({ model, messages, temperature: 0.3, ...(jsonMode ? { response_format: { type: "json_object" } } : {}) }),
+    }), 120000);
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      throw new Error("AI request failed (" + res.status + "). " + (t ? t.slice(0, 160) : "Check your key and model."));
+    }
+    const json = await res.json();
+    const content = json && json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content;
+    if (!content) throw new Error("AI returned an empty response. Retry.");
+    return content;
+  },
+  parseJSON(raw) {
+    let text = String(raw).trim();
+    const fence = text.match(/```(?:json)?([\s\S]*?)```/);
+    if (fence) text = fence[1].trim();
+    const first = text.indexOf("{"), last = text.lastIndexOf("}");
+    if (first > 0 || last < text.length - 1) text = text.slice(first, last + 1);
+    try { return JSON.parse(text); } catch (e) { throw new Error("The AI response was not valid JSON. Retry the instruction."); }
+  },
+  // Hierarchical map for long transcripts
+  async buildStoryMap(transcript) {
+    if (transcript.length <= 150) return null;
+    const groups = [];
+    for (let i = 0; i < transcript.length; i += 60) groups.push(transcript.slice(i, i + 60));
+    const summaries = [];
+    for (let gi = 0; gi < groups.length; gi++) {
+      const g = groups[gi];
+      const body = g.map((s) => `${s.index}|${fmt(s.start)}|${s.text}`).join("\n");
+      const raw = await this.chat([
+        { role: "system", content: 'Summarise this transcript chunk for a video editor. Reply JSON: {"summary":string,"keyMoments":[{"segmentId":number,"why":string}]} where segmentId is the leading number of a line.' },
+        { role: "user", content: body },
+      ]);
+      const j = this.parseJSON(raw);
+      summaries.push({ chunk: gi + 1, range: [g[0].index, g[g.length - 1].index], summary: String(j.summary || ""), keyMoments: Array.isArray(j.keyMoments) ? j.keyMoments.slice(0, 12) : [] });
+    }
+    return summaries;
+  },
+  transcriptDigest(transcript) {
+    return transcript.map((s) => `${s.index}|${fmt(s.start)}-${fmt(s.end)}|${s.text}`).join("\n");
+  },
+  async generateVersions(instruction, transcript, priorChat, activePlan) {
+    const storyMap = await this.buildStoryMap(transcript);
+    const sys = [
+      "You are Clippi, a video edit planner. You cut videos by selecting transcript segments.",
+      "You NEVER invent timestamps. You only reference the integer segment indexes given to you.",
+      'Reply with STRICT JSON only, shape: {"summary": string, "versionA": {"label": string, "plan": [{"segmentId": number, "action": "keep"|"remove", "reason": string}]}, "versionB": {"label": string, "plan": [...]}}',
+      "versionA = Story cut: preserve narrative flow, context and setup, gentle trimming.",
+      "versionB = Impact cut: aggressive, keep only the strongest highlight moments, much shorter.",
+      "You may remove partial phrases or individual words within a transcript segment, not only whole segments - split a segment's action at the word level when only part of it should be cut, so the resulting script reads naturally and clearly conveys the speaker's intended point.",
+      "Every transcript segment index MUST appear exactly once in each plan with keep or remove.",
+    ].join(" ");
+    const parts = [];
+    if (storyMap) parts.push("STORY MAP (chunk summaries of a long transcript):\n" + JSON.stringify(storyMap));
+    parts.push("TRANSCRIPT (index|start-end|text):\n" + this.transcriptDigest(transcript));
+    if (activePlan && activePlan.length) parts.push("CURRENT ACTIVE PLAN (segmentId:action):\n" + activePlan.map((p) => p.segmentIndex + ":" + p.action).join(","));
+    if (priorChat && priorChat.length) parts.push("PRIOR CONVERSATION:\n" + priorChat.map((m) => m.role + ": " + m.content).join("\n").slice(-4000));
+    parts.push("INSTRUCTION FROM USER:\n" + instruction);
+    const raw = await this.chat([{ role: "system", content: sys }, { role: "user", content: parts.join("\n\n") }]);
+    const json = this.parseJSON(raw);
+    return validatePlanResponse(json, transcript);
+  },
+};
+
+function validatePlanResponse(json, transcript) {
+  if (!json || typeof json !== "object") throw new Error("AI response had an unexpected shape.");
+  const byIndex = new Map(transcript.map((s) => [s.index, s]));
+  const clean = (v, fallbackLabel) => {
+    if (!v || !Array.isArray(v.plan)) throw new Error("AI response is missing a valid edit plan.");
+    const seen = new Map();
+    for (const item of v.plan) {
+      if (!item || typeof item !== "object") continue;
+      const idx = Number(item.segmentId);
+      if (!Number.isFinite(idx) || !byIndex.has(idx)) continue;
+      const action = item.action === "remove" ? "remove" : item.action === "keep" ? "keep" : null;
+      if (!action) continue;
+      seen.set(idx, { segmentIndex: idx, action, reason: typeof item.reason === "string" ? item.reason.slice(0, 300) : "" });
+    }
+    if (!seen.size) throw new Error("The AI plan did not reference any real transcript segments. Retry with a clearer instruction.");
+    for (const s of transcript) if (!seen.has(s.index)) seen.set(s.index, { segmentIndex: s.index, action: "keep", reason: "" });
+    const plan = [...seen.values()].sort((a, b) => a.segmentIndex - b.segmentIndex);
+    if (!plan.some((p) => p.action === "keep")) throw new Error("The AI plan removed every segment. Retry with a clearer instruction.");
+    return { label: typeof v.label === "string" && v.label.trim() ? v.label.trim().slice(0, 60) : fallbackLabel, plan };
+  };
+  return {
+    summary: typeof json.summary === "string" ? json.summary.slice(0, 1200) : "Generated two alternative cuts.",
+    versionA: clean(json.versionA, "Version A - Story"),
+    versionB: clean(json.versionB, "Version B - Impact"),
+  };
+}
+
+/* ============================ DATA HELPERS ============================ */
+function getEditedTime(rawT, ranges) {
+  let e = 0;
+  for (const r of ranges) {
+    if (rawT > r.end) e += (r.end - r.start);
+    else if (rawT >= r.start) { e += (rawT - r.start); break; }
+  }
+  return e;
+}
+function getRawTime(editedT, ranges) {
+  let e = 0;
+  for (const r of ranges) {
+    const dur = r.end - r.start;
+    if (editedT <= e + dur) return r.start + (editedT - e);
+    e += dur;
+  }
+  return ranges.length ? ranges[ranges.length - 1].end : 0;
+}
+async function refreshProjects() {
+  const projects = (await getAll("projects")).sort((a, b) => b.updatedAt - a.updatedAt);
+  State.set({ projects });
+}
+async function loadProject(projectId) {
+  const project = await getRecord("projects", projectId);
+  if (!project) throw new Error("That project no longer exists.");
+  const assets = await getAllByIndex("videoAssets", "projectId", projectId);
+  const transcript = (await getAllByIndex("transcriptSegments", "projectId", projectId)).sort((a, b) => a.index - b.index);
+  const versions = (await getAllByIndex("editVersions", "projectId", projectId)).sort((a, b) => a.createdAt - b.createdAt);
+  const chat = (await getAllByIndex("chatMessages", "projectId", projectId)).sort((a, b) => a.createdAt - b.createdAt);
+  const map = {};
+  for (const v of versions) map[v.id] = (await getAllByIndex("editSegments", "editVersionId", v.id)).sort((a, b) => a.order - b.order);
+  State.set({
+    screen: "editor", currentProject: project, currentVideoAsset: assets[0] || null,
+    transcript, editVersions: versions, chatMessages: chat, editSegmentsByVersion: map,
+    activeVersionId: project.activeVersionId || (versions[0] ? versions[0].id : null),
+    selectedSegmentIds: [], search: { q: "", matches: [], cursor: 0 },
+    exportState: { status: "idle", progress: 0, url: null },
+    history: { undoStack: [], redoStack: [] },
+    processing: { stage: null, progress: 0, engine: null, message: "" },
+  });
+  localStorage.setItem("clippi:lastProject", projectId);
+}
+function activeEditSegments() { const s = S(); return (s.activeVersionId && s.editSegmentsByVersion[s.activeVersionId]) || []; }
+function keepMapFor(versionId) {
+  const list = (S().editSegmentsByVersion[versionId] || []);
+  const m = new Map();
+  for (const e of list) m.set(e.transcriptSegmentId, e.action);
+  return m;
+}
+function keptRanges(versionId) {
+  const m = keepMapFor(versionId);
+  const kept = S().transcript.filter((t) => (m.get(t.id) || "keep") === "keep");
+  const ranges = [];
+  for (const t of kept) {
+    const last = ranges[ranges.length - 1];
+    if (last && Math.abs(t.start - last.end) < 0.08) last.end = t.end;
+    else ranges.push({ start: t.start, end: t.end });
+  }
+  return ranges;
+}
+async function touchProject(patch = {}) {
+  const p = { ...S().currentProject, ...patch, updatedAt: now() };
+  await updateRecord("projects", p);
+  State.set({ currentProject: p });
+  return p;
+}
+
+/* history */
+function pushHistory(label) {
+  const snap = JSON.stringify({
+    transcript: S().transcript,
+    editSegmentsByVersion: S().editSegmentsByVersion,
+    activeVersionId: S().activeVersionId,
+  });
+  const undoStack = S().history.undoStack.concat([{ label, snap }]).slice(-40);
+  State.set({ history: { undoStack, redoStack: [] } });
+  const proj = S().currentProject;
+  if (proj) addRecord("editHistory", { id: uid(), projectId: proj.id, snapshotOf: "editVersion", refId: S().activeVersionId || proj.id, action: label, stateSnapshot: snap, createdAt: now() }).catch(() => {});
+}
+async function deleteMessageAndAfter(pId, msgId) {
+  const all = (await getAllByIndex('chatMessages', 'projectId', pId)).sort((a,b)=>a.createdAt-b.createdAt), idx = all.findIndex(m => m.id === msgId);
+  if (idx < 0) return;
+  const msgIds = all.slice(idx).map(m=>m.id);
+  await runTransaction(['chatMessages', 'editVersions', 'editSegments', 'projects'], async (api) => {
+    msgIds.forEach(id => api.del('chatMessages', id));
+    const vToDel = (await api.byIndex('editVersions', 'projectId', pId)).filter(v => msgIds.includes(v.sourceInstructionId) || (v.relatedVersionIds && v.relatedVersionIds.some(rv => msgIds.includes(rv))));
+    for (const v of vToDel) { (await api.byIndex('editSegments', 'editVersionId', v.id)).forEach(s => api.del('editSegments', s.id)); api.del('editVersions', v.id); }
+    const p = S().currentProject;
+    if (p && p.activeVersionId && vToDel.find(v=>v.id===p.activeVersionId)) api.put('projects', {...p, activeVersionId: null, updatedAt: now()});
+  });
+  await loadProject(pId); State.set({ ui: { ...S().ui, msgActionOpen: null, editingMsgId: null } });
+}
+
+async function applySnapshot(snapStr) {
+  const s = JSON.parse(snapStr);
+  await runTransaction(["transcriptSegments", "editSegments", "projects"], async (api) => {
+    for (const t of s.transcript) api.put("transcriptSegments", t);
+    for (const list of Object.values(s.editSegmentsByVersion)) for (const e of list) api.put("editSegments", e);
+    api.put("projects", { ...S().currentProject, activeVersionId: s.activeVersionId, updatedAt: now() });
+  });
+  State.set({ transcript: s.transcript, editSegmentsByVersion: s.editSegmentsByVersion, activeVersionId: s.activeVersionId });
+}
+
+/* ============================ EVENT HANDLERS ============================ */
+Bus.on("project:create", async (name) => {
+  const p = { id: uid(), name: name.trim().slice(0, 60), createdAt: now(), updatedAt: now(), status: "draft", activeVersionId: null };
+  await addRecord("projects", p);
+  State.set({ ui: { ...S().ui, renamingId: null, homeCreateOpen: false } });
+  await refreshProjects();
+  await loadProject(p.id);
+});
+Bus.on("project:rename", async ({ id, name }) => {
+  const p = await getRecord("projects", id);
+  if (!p) throw new Error("Project not found.");
+  p.name = name.trim().slice(0, 60); p.updatedAt = now();
+  await updateRecord("projects", p);
+  if (S().currentProject && S().currentProject.id === id) State.set({ currentProject: p });
+  State.set({ ui: { ...S().ui, renamingId: null } });
+  await refreshProjects();
+});
+Bus.on("project:delete", async (id) => {
+  await runTransaction(Object.keys(STORES).filter((s) => s !== "appSettings"), async (api) => {
+    for (const store of ["videoAssets", "transcriptSegments", "chatMessages", "editHistory"]) {
+      const rows = await api.byIndex(store, "projectId", id);
+      rows.forEach((r) => api.del(store, r.id));
+    }
+    const versions = await api.byIndex("editVersions", "projectId", id);
+    for (const v of versions) {
+      const es = await api.byIndex("editSegments", "editVersionId", v.id);
+      es.forEach((e) => api.del("editSegments", e.id));
+      api.del("editVersions", v.id);
+    }
+    api.del("projects", id);
+  });
+  State.set({ ui: { ...S().ui, confirmDeleteId: null } });
+  if (S().currentProject && S().currentProject.id === id) State.set({ screen: "home", currentProject: null, ui: { ...S().ui, homeCreateOpen: false, renamingId: null } });
+  await refreshProjects();
+  toast("Project deleted.", "ok");
+});
+Bus.on("project:open", async (id) => { await loadProject(id); });
+
+Bus.on("video:import", async (file) => {
+  const proj = S().currentProject;
+  if (!proj) throw new Error("Open a project first.");
+  if (!file || !file.type || !file.type.startsWith("video/")) throw new Error("That file is not a video. Import an mp4, mov, webm or similar.");
+  if (file.size > 1024 * 1024 * 1024) toast("This file is over 1 GB — browser processing may be slow or hit storage limits.", "info");
+  State.set({ processing: { stage: "uploading", progress: 0, engine: null, message: "Storing video locally" } });
+  const duration = await probeDuration(file).catch(() => 0);  const asset = { id: uid(), projectId: proj.id, fileName: file.name, mimeType: file.type, duration, blob: file, createdAt: now() };
+  await addRecord('videoAssets', asset);
+  await touchProject({ status: 'processing' });
+  State.set({ currentVideoAsset: asset, processing: { stage: null, progress: 0, engine: null, message: '', startedAt: 0 } });
+  await refreshProjects();
+  await runTranscription();
+});
+Bus.on("video:remove", async () => {
+  const a = S().currentVideoAsset; if (!a) return;
+  await resetMedia(a.id);
+  toast("Video and derived edits removed.", "ok");
+});
+Bus.on("video:replace", async (file) => {
+  const a = S().currentVideoAsset;
+  if (a) await resetMedia(a.id);
+  await Bus.emit("video:import", file);
+});
+async function resetMedia(assetId) {
+  const proj = S().currentProject;
+  await runTransaction(["videoAssets", "transcriptSegments", "editVersions", "editSegments", "projects"], async (api) => {
+    api.del("videoAssets", assetId);
+    (await api.byIndex("transcriptSegments", "projectId", proj.id)).forEach((r) => api.del("transcriptSegments", r.id));
+    const versions = await api.byIndex("editVersions", "projectId", proj.id);
+    for (const v of versions) {
+      (await api.byIndex("editSegments", "editVersionId", v.id)).forEach((e) => api.del("editSegments", e.id));
+      api.del("editVersions", v.id);
+    }
+    api.put("projects", { ...proj, activeVersionId: null, status: "draft", updatedAt: now() });
+  });
+  await loadProject(proj.id);
+  await refreshProjects();
+}
+function probeDuration(file) {
+  return new Promise((resolve, reject) => {
+    const v = document.createElement("video");
+    const timer = setTimeout(() => { try { URL.revokeObjectURL(v.src); } catch (_) {} reject(new Error("Reading the video's metadata timed out. Retry, or use a smaller file.")); }, probeTimeoutMs(file.size));
+    v.preload = "metadata";
+    v.onloadedmetadata = () => { clearTimeout(timer); const d = v.duration; URL.revokeObjectURL(v.src); resolve(isFinite(d) ? d : 0); };
+    v.onerror = () => { clearTimeout(timer); reject(new Error("Could not read this video file.")); };
+    v.src = URL.createObjectURL(file);
+  });
+}
+
+async function runTranscription() {
+  const proj = S().currentProject, asset = S().currentVideoAsset;
+  if (!asset) throw new Error('Import a video first.');
+  let engine;
+  try { engine = await resolveEngine(); } catch (e) { State.set({ processing: { stage: null, progress: 0, engine: null, message: '', gesturePrompt: false }, errors: { ...S().errors, transcribe: e.message } }); throw e; }
+  State.set({ errors: { ...S().errors, transcribe: null }, processing: { stage: 'extracting', progress: 0, engine: engine.name, message: 'Reading audio from video', gesturePrompt: false, startedAt: now() } });
+  try {
+    const audio = await withTimeout(Media.extractAudioNative(asset.blob, (p) => State.set({ processing: { ...S().processing, progress: p, message: 'Reading audio from video', gesturePrompt: false } })), extractTimeoutMs(asset.duration || 0, asset.blob ? asset.blob.size : 0));
+    State.set({ processing: { stage: "transcribing", progress: 0, engine: engine.name, message: "Loading transcription engine" } });
+    const segs = await withTimeout(engine.transcribe(audio, {
+      onStage: (m) => State.set({ processing: { ...S().processing, message: m } }),
+      onModel: (p, file) => State.set({ ui: { ...S().ui, modelProgress: p < 1 ? { p, file } : null }, processing: { ...S().processing, progress: p, message: "Downloading AI model (~400-500MB) — this only happens once" } }),
+    }), transcribeTimeoutMs(asset.duration || (audio && audio.length ? audio.length / 16000 : 0)));
+    if (!segs.length) throw new Error("No speech was detected in this video.");
+    const rows = segs.map((s, i) => ({ id: uid(), projectId: proj.id, videoAssetId: asset.id, index: i, start: s.start, end: s.end, text: s.text, words: s.words || [], engineUsed: engine.name }));
+    await runTransaction(["transcriptSegments", "projects"], async (api) => {
+      (await api.byIndex("transcriptSegments", "projectId", proj.id)).forEach((r) => api.del("transcriptSegments", r.id));
+      rows.forEach((r) => api.put("transcriptSegments", r));
+      api.put("projects", { ...proj, status: "ready", updatedAt: now() });
+    });
+    State.set({ transcript: rows, currentProject: { ...proj, status: "ready" }, processing: { stage: null, progress: 0, engine: engine.name, message: "" }, ui: { ...S().ui, modelProgress: null } });
+    await refreshProjects();
+    Bus.emit("transcript:ready");
+    toast("Transcript ready — " + rows.length + " segments.", "ok");
+  } catch (e) {
+    if (e && (e.name === 'GestureRequired' || e.message === 'GestureRequired')) {
+      State.set({ processing: { stage: 'extracting', progress: 0, engine: engine ? engine.name : null, message: 'Audio playback requires user interaction', gesturePrompt: true }, errors: { ...S().errors, transcribe: null } });
+      return;
+    }
+    const timedOut = /timed out/i.test(e.message || '');
+    if (timedOut) Media.cancel();
+    const message = timedOut ? 'Audio processing did not respond. Check your connection and retry; if this keeps happening, try a different browser.' : e.message === 'Cancelled' ? 'Transcription cancelled. Retry when ready.' : (e.message || String(e));
+    State.set({ processing: { stage: null, progress: 0, engine: engine ? engine.name : null, message: '', gesturePrompt: false }, errors: { ...S().errors, transcribe: message } });
+    throw e;
+  }
+}
+
+Bus.on("transcript:edit", async ({ id, text }) => {
+  const t = text.trim();
+  if (!t) throw new Error("Segment text cannot be empty.");
+  pushHistory("transcript edit");
+  const transcript = S().transcript.map((s) => (s.id === id ? { ...s, text: t } : s));
+  await updateRecord("transcriptSegments", transcript.find((s) => s.id === id));
+  State.set({ transcript });
+});
+Bus.on("transcript:split", async (id) => {
+  const s = S().transcript.find((x) => x.id === id);
+  if (!s) return;
+  const words = s.text.split(/\s+/);
+  if (words.length < 2) throw new Error("This segment is too short to split.");
+  const half = Math.ceil(words.length / 2), mid = +(s.start + (s.end - s.start) / 2).toFixed(3);
+  pushHistory("split segment");
+  const a = { ...s, id: uid(), end: mid, text: words.slice(0, half).join(" "), originalId: s.id };
+  const b = { ...s, id: uid(), start: mid, text: words.slice(half).join(" "), originalId: s.id };
+  await rewriteTranscript(S().transcript.flatMap((x) => (x.id === id ? [a, b] : [x])));
+});
+Bus.on("transcript:merge", async (id) => {
+  const list = S().transcript, i = list.findIndex((x) => x.id === id);
+  if (i < 0 || i === list.length - 1) throw new Error("There is no following segment to merge with.");
+  pushHistory("merge segments");
+  const merged = { ...list[i], id: uid(), end: list[i + 1].end, text: (list[i].text + " " + list[i + 1].text).trim(), originalId: list[i].id };
+  await rewriteTranscript(list.flatMap((x, k) => (k === i ? [merged] : k === i + 1 ? [] : [x])));
+});
+async function rewriteTranscript(next) {
+  const proj = S().currentProject;
+  const rows = next.map((s, i) => ({ ...s, index: i }));
+  await runTransaction(["transcriptSegments", "editSegments", "editVersions"], async (api) => {
+    (await api.byIndex("transcriptSegments", "projectId", proj.id)).forEach((r) => api.del("transcriptSegments", r.id));
+    rows.forEach((r) => api.put("transcriptSegments", r));
+    const versions = await api.byIndex("editVersions", "projectId", proj.id);
+    for (const v of versions) {
+      const existing = await api.byIndex("editSegments", "editVersionId", v.id);
+      const byT = new Map(existing.map((e) => [e.transcriptSegmentId, e]));
+      existing.forEach((e) => api.del("editSegments", e.id));
+      rows.forEach((r, i) => {
+      const existingEdit = byT.get(r.id) || (r.originalId && byT.get(r.originalId));
+      api.put("editSegments", {
+        id: uid(), editVersionId: v.id, transcriptSegmentId: r.id,
+        action: (existingEdit && existingEdit.action) || "keep",
+        reason: (existingEdit && existingEdit.reason) || null, order: i,
+      })
+    });
+    }
+  });
+  await loadProject(proj.id);
+}
+
+Bus.on("edit:apply", async ({ segmentIds, action }) => {
+  let versionId = S().activeVersionId;
+  if (!versionId) versionId = await createManualVersion();
+  pushHistory("manual " + action);
+  const list = (S().editSegmentsByVersion[versionId] || []).slice();
+  const byT = new Map(list.map((e) => [e.transcriptSegmentId, e]));
+  const changed = [];
+  for (const tid of segmentIds) {
+    let row = byT.get(tid);
+    if (!row) { row = { id: uid(), editVersionId: versionId, transcriptSegmentId: tid, action, reason: null, order: S().transcript.findIndex((t) => t.id === tid) }; list.push(row); byT.set(tid, row); }
+    row.action = action; row.reason = null; changed.push(row);
+  }
+  await runTransaction(["editSegments"], (api) => { changed.forEach((r) => api.put("editSegments", r)); });
+  State.set({ editSegmentsByVersion: { ...S().editSegmentsByVersion, [versionId]: list }, activeVersionId: versionId });
+});
+Bus.on('edit:preset', async (preset) => {
+  const proj = S().currentProject;
+  if (!proj || !S().transcript.length) throw new Error('Generate a transcript first.');
+  const v = { id: uid(), projectId: proj.id, label: preset === 'silent' ? 'Silent parts removed' : 'Clipped to 60 seconds', createdAt: now(), parentVersionId: null, sourceInstructionId: null };
+  let keptDur = 0;
+  const segs = S().transcript.map((t, i) => {
+    let action = 'keep', dur = t.end - t.start;
+    if (preset === '60sec' && keptDur + dur > 60) action = 'remove';
+    else if (preset === '60sec') keptDur += dur;
+    return { id: uid(), editVersionId: v.id, transcriptSegmentId: t.id, action, reason: null, order: i };
+  });
+  await finishPreset(proj, v, segs);
+});
+
+async function createManualVersion() {
+  const proj = S().currentProject;
+  const v = { id: uid(), projectId: proj.id, label: 'Manual edit', createdAt: now(), parentVersionId: null, sourceInstructionId: null };
+  const segs = S().transcript.map((t, i) => ({ id: uid(), editVersionId: v.id, transcriptSegmentId: t.id, action: "keep", reason: null, order: i }));
+  await runTransaction(["editVersions", "editSegments", "projects"], (api) => {
+    api.put("editVersions", v); segs.forEach((s) => api.put("editSegments", s));
+    api.put("projects", { ...proj, activeVersionId: v.id, updatedAt: now() });
+  });
+  State.set({
+    editVersions: S().editVersions.concat([v]),
+    editSegmentsByVersion: { ...S().editSegmentsByVersion, [v.id]: segs },
+    activeVersionId: v.id, currentProject: { ...proj, activeVersionId: v.id },
+  });
+  return v.id;
+}
+async function finishPreset(proj, v, segs) {
+  await runTransaction(['editVersions', 'editSegments', 'projects'], (api) => {
+    api.put('editVersions', v); segs.forEach((s) => api.put('editSegments', s));
+    api.put('projects', { ...proj, activeVersionId: v.id, updatedAt: now() });
+  });
+  State.set({ editVersions: S().editVersions.concat([v]), editSegmentsByVersion: { ...S().editSegmentsByVersion, [v.id]: segs }, activeVersionId: v.id, currentProject: { ...proj, activeVersionId: v.id } });
+  pushHistory('preset edit');
+}
+
+Bus.on('edit:undo', async () => {
+  const { undoStack, redoStack } = S().history;
+  if (!undoStack.length) return;
+  const last = undoStack[undoStack.length - 1];
+  const current = JSON.stringify({ transcript: S().transcript, editSegmentsByVersion: S().editSegmentsByVersion, activeVersionId: S().activeVersionId });
+  await applySnapshot(last.snap);
+  State.set({ history: { undoStack: undoStack.slice(0, -1), redoStack: redoStack.concat([{ label: last.label, snap: current }]) } });
+});
+Bus.on("edit:redo", async () => {
+  const { undoStack, redoStack } = S().history;
+  if (!redoStack.length) return;
+  const nxt = redoStack[redoStack.length - 1];
+  const current = JSON.stringify({ transcript: S().transcript, editSegmentsByVersion: S().editSegmentsByVersion, activeVersionId: S().activeVersionId });
+  await applySnapshot(nxt.snap);
+  State.set({ history: { undoStack: undoStack.concat([{ label: nxt.label, snap: current }]), redoStack: redoStack.slice(0, -1) } });
+});
+
+Bus.on("version:select", async (id) => {
+  await touchProject({ activeVersionId: id });
+  State.set({ activeVersionId: id });
+});
+Bus.on("version:delete", async (id) => {
+  const proj = S().currentProject;
+  await runTransaction(["editVersions", "editSegments", "projects"], async (api) => {
+    (await api.byIndex("editSegments", "editVersionId", id)).forEach((e) => api.del("editSegments", e.id));
+    api.del("editVersions", id);
+    if (proj.activeVersionId === id) api.put("projects", { ...proj, activeVersionId: null, updatedAt: now() });
+  });
+  const map = { ...S().editSegmentsByVersion }; delete map[id];
+  const versions = S().editVersions.filter((v) => v.id !== id);
+  State.set({
+    editVersions: versions, editSegmentsByVersion: map,
+    activeVersionId: S().activeVersionId === id ? (versions[0] ? versions[0].id : null) : S().activeVersionId,
+    currentProject: proj.activeVersionId === id ? { ...proj, activeVersionId: null } : proj,
+    ui: { ...S().ui, confirmDeleteVersionId: null },
+  });
+});
+
+Bus.on("chat:send", async (instruction) => {
+  const text = instruction.trim();
+  if (!text) throw new Error("Type an edit instruction first.");
+  const proj = S().currentProject;
+  State.set({ ui: { ...S().ui, chatBusy: true }, errors: { ...S().errors, ai: null } });
+  const userMsg = { id: uid(), projectId: proj.id, role: 'user', content: text, relatedVersionIds: null, createdAt: now() };
+  State.set({ chatMessages: S().chatMessages.concat([userMsg]) });
+  await addRecord('chatMessages', userMsg);
+  if (!S().currentVideoAsset) {
+    const isGreeting = /^(hi|hello|hey|yo|what is this|help|features)/i.test(text);
+    let response = "Hey! Please send your video first so I can start editing it 🎬";
+    if (isGreeting) {
+      response = "I'm Clippi, an AI video editor. I transcribe your video, let you edit by chat or by clicking transcript lines, generate two alternative AI cuts (Story vs Impact), and export your final cut — all locally in your browser.";
+    }
+    const assistantMsg = { id: uid(), projectId: proj.id, role: "assistant", content: response, relatedVersionIds: null, createdAt: now() + 1 };
+    await addRecord('chatMessages', assistantMsg);
+    State.set({ chatMessages: S().chatMessages.concat([assistantMsg]), ui: { ...S().ui, chatBusy: false } });
+    return;
+  }
+  try {
+    const active = S().activeVersionId;
+    const activePlan = active ? (S().editSegmentsByVersion[active] || []).map((e) => {
+      const t = S().transcript.find((x) => x.id === e.transcriptSegmentId);
+      return { segmentIndex: t ? t.index : -1, action: e.action };
+    }).filter((x) => x.segmentIndex >= 0) : null;
+
+    const result = await AI.generateVersions(text, S().transcript, S().chatMessages.slice(-10), activePlan);
+    const parent = active || null;
+    const mk = (v, fallback) => {
+      const ver = { id: uid(), projectId: proj.id, label: v.label || fallback, createdAt: now(), parentVersionId: parent, sourceInstructionId: userMsg.id };
+      const byIndex = new Map(S().transcript.map((t) => [t.index, t]));
+      const segs = v.plan.map((p, i) => ({ id: uid(), editVersionId: ver.id, transcriptSegmentId: byIndex.get(p.segmentIndex).id, action: p.action, reason: p.reason || null, order: i }));
+      return { ver, segs };
+    };
+    const A = mk(result.versionA, "Version A - Story"), B = mk(result.versionB, "Version B - Impact");
+    const keptA = A.segs.filter((s) => s.action === "keep").length, keptB = B.segs.filter((s) => s.action === "keep").length;
+    const assistantMsg = {
+      id: uid(), projectId: proj.id, role: "assistant",
+      content: result.summary + "\n\n" + A.ver.label + ": keeps " + keptA + " of " + A.segs.length + " segments.\n" + B.ver.label + ": keeps " + keptB + " of " + B.segs.length + " segments.",
+      relatedVersionIds: [A.ver.id, B.ver.id], createdAt: now() + 1,
+    };
+    await runTransaction(["chatMessages", "editVersions", "editSegments", "projects"], (api) => {
+      api.put("chatMessages", userMsg);
+      api.put("editVersions", A.ver); A.segs.forEach((s) => api.put("editSegments", s));
+      api.put("editVersions", B.ver); B.segs.forEach((s) => api.put("editSegments", s));
+      api.put("chatMessages", assistantMsg);
+      api.put("projects", { ...proj, activeVersionId: A.ver.id, status: "ready", updatedAt: now() });
+    });
+    pushHistory("ai edit");
+    State.set({
+      chatMessages: S().chatMessages.concat([assistantMsg]),
+      editVersions: S().editVersions.concat([A.ver, B.ver]),
+      editSegmentsByVersion: { ...S().editSegmentsByVersion, [A.ver.id]: A.segs, [B.ver.id]: B.segs },
+      activeVersionId: A.ver.id,
+      currentProject: { ...proj, activeVersionId: A.ver.id, status: "ready" },
+      ui: { ...S().ui, chatBusy: false, compare: true },
+    });
+    await refreshProjects();
+  } catch (e) {
+    const errMap = { ...S().ui.chatErrors, [userMsg.id]: e.message || String(e) };
+    State.set({ ui: { ...S().ui, chatBusy: false, chatErrors: errMap }, errors: { ...S().errors, ai: null } });
+    Bus.emit('ai:error', e);
+    throw e;
+  }
+});
+
+Bus.on("export:start", async () => {
+  const asset = S().currentVideoAsset;
+  if (!asset) throw new Error("Import a video first.");
+  const vid = S().activeVersionId;
+  const ranges = vid ? keptRanges(vid) : S().transcript.map((t) => ({ start: t.start, end: t.end }));
+  if (!ranges.length) throw new Error("Nothing is marked as keep — nothing to export.");
+  State.set({ exportState: { status: "rendering", progress: 0, url: null } });
+  try {
+    const editedDur = ranges.reduce((n, r) => n + (r.end - r.start), 0);
+    // renderCut enforces its own scaled internal timeouts; the outer cap adds headroom for I/O.
+    const out = await withTimeout(Media.renderCut(asset.blob, ranges, (p) => State.set({ exportState: { ...S().exportState, progress: p } })), renderTimeoutMs(editedDur, ranges.length) + 120000);
+    const url = URL.createObjectURL(out);
+    State.set({ exportState: { status: 'done', progress: 1, url } });
+    const a = el('a', { href: url, download: 'clippi_cut.mp4' });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    toast('Export downloaded.', 'ok');
+  } catch (e) {
+    State.set({ exportState: { status: "error", progress: 0, url: null } });
+    throw new Error("Export failed: " + (e.message || e));
+  }
+});
+Bus.on("export:cancel", async () => { Media.cancel(); State.set({ exportState: { status: "idle", progress: 0, url: null } }); toast("Rendering cancelled.", "info"); });
+Bus.on("settings:update", async (patch) => {
+  const s = { ...S().settings, ...patch, key: "global" };
+  await updateRecord("appSettings", s);
+  State.set({ settings: s });
+  toast("Settings saved.", "ok");
+});
+
+/* ============================ UI: shell ============================ */
+const root = document.getElementById("app");
+function render() {
+  const s = S();
+  root.replaceChildren(s.screen === "home" ? HomeScreen() : s.screen === "menu" ? MenuScreen() : s.screen === "settings" ? SettingsScreen() : EditorScreen());
+  refreshIcons();
+}
+function header(title, subtitle, right, cls = '') {
+  return el('header', { class: 'flex items-start justify-between gap-3 px-4 pt-6 pb-4 ' + cls }, [
+    el("div", {}, [
+      el("h1", { class: "text-xl font-semibold tracking-tight", text: title }),
+      subtitle ? el("p", { class: "text-sm text-neutral-500 mt-0.5", text: subtitle }) : null,
+    ]),
+    el("div", { class: "flex items-center gap-2" }, right || []),
+  ]);
+}
+
+/* ============================ UI: HOME ============================ */
+async function startNewProjectFromHome(action) {
+  const existing = (S().projects || []).map((p) => (p.name || '').toLowerCase());
+  let name = 'Untitled';
+  let i = 1;
+  while (existing.includes(name.toLowerCase())) {
+    name = 'Untitled' + i;
+    i++;
+  }
+  await Bus.emit('project:create', name);
+  if (action && action.type === 'video') {
+    await Bus.emit('video:import', action.file);
+  } else if (action && action.type === 'text') {
+    await Bus.emit('chat:send', action.text);
+  } else if (action && action.type === 'preset') {
+    await Bus.emit('edit:preset', action.preset);
+  }
+}
+
+function HomeScreen() {
+  const s = S();
+  const wrap = el("div", { class: "max-w-md mx-auto pb-24" });
+  const homeHeader = el("header", { class: "px-4 pt-6 pb-2" }, [
+    el("div", { class: "overflow-hidden rounded-2xl border border-neutral-300 grid grid-cols-12 shadow-xs" }, [
+      el("div", { class: "col-span-8 bg-neutral-50 p-3 flex items-center gap-2.5" }, [
+        el("div", { class: "h-8 w-8 rounded-lg bg-neutral-900 text-white flex items-center justify-center shadow-xs shrink-0" }, [icon("columns-2", "w-4 h-4")]),
+        el("span", { class: "text-xs font-bold uppercase text-neutral-900 tracking-tight", text: "Clippi" }),
+        el("span", { class: "rounded-md bg-neutral-200 px-1.5 py-0.5 text-[8px] font-bold uppercase text-neutral-700", text: "PRO" }),
+      ]),
+      el("div", { class: "col-span-4 bg-neutral-900 p-3 flex items-center justify-center border-l border-neutral-300" }, [
+        el("button", { type: "button", title: "Menu", class: "flex h-8 w-8 items-center justify-center rounded-lg bg-neutral-800 text-neutral-200 hover:text-white transition", onclick: () => State.set({ screen: "menu" }) }, [icon("layout-grid", "h-4 w-4")]),
+      ]),
+    ]),
+  ]);
+  const signInBanner = el("div", { class: "mx-4 mt-3 flex items-center justify-between rounded-2xl border border-blue-100 bg-blue-50 p-4" }, [
+    el("p", { class: "max-w-[13rem] text-xs leading-relaxed text-blue-900", text: "Sign in to sync your projects across devices and unlock Pro features." }),
+    btn("Sign in", { kind: "primary", onclick: () => toast("Sign-in isn't connected yet — coming soon.", "info") }),
+  ]);
+  wrap.appendChild(el("div", { class: "sticky top-0 z-30 bg-[#f7f7f6] pb-2" }, [homeHeader, signInBanner]));
+
+  if (s.ui.homeTab === 'home') {
+    const homeInput = el('textarea', { id: 'home-composer-input', rows: '1', placeholder: 'What do you want to make?', class: 'min-w-0 flex-1 resize-none rounded-full border-0 bg-neutral-100 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-neutral-300' });
+    const sendHome = () => {
+      const val = homeInput.value.trim();
+      if (val) { homeInput.value = ''; startNewProjectFromHome({ type: 'text', text: val }); }
+    };
+    homeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendHome(); } });
+    const homeFileInput = el('input', { type: 'file', accept: 'video/*', class: 'hidden', onchange: (e) => { const f = e.target.files[0]; if (f) startNewProjectFromHome({ type: 'video', file: f }); } });
+    const suggIcon = (sugg) => sugg.pId === 'silent' ? 'volume-x' : sugg.pId === '60sec' ? 'timer' : sugg.pId === 'noise' ? 'mic-off' : sugg.pId === 'repeat' ? 'repeat-2' : (sugg.label && sugg.label.toLowerCase().includes('highlight')) ? 'sparkles' : 'zap';
+    const presetHome = (sugg, idx) => el('button', { type: 'button', class: (idx === 0 ? 'rounded-full bg-neutral-900 text-white px-3 py-1 text-xs font-semibold hover:bg-neutral-800 transition flex items-center gap-1 shrink-0' : 'rounded-full bg-neutral-100 text-neutral-700 hover:bg-neutral-200 px-3 py-1 text-xs font-semibold transition flex items-center gap-1 shrink-0'), onclick: () => startNewProjectFromHome(sugg.pId ? { type: 'preset', preset: sugg.pId } : { type: 'text', text: sugg.text }) }, [icon(suggIcon(sugg), 'w-3 h-3 ' + (idx === 0 ? '' : 'text-neutral-500')), el('span', { text: sugg.label })]);
+    const composerNode = el('div', { class: 'mx-4 mt-4 rounded-2xl border border-neutral-200 bg-white p-3 shadow-md space-y-2.5' }, [
+      el('div', { class: 'flex items-center gap-2 overflow-x-auto flex-nowrap pb-1.5' }, buildSuggestions().map((sugg, i) => presetHome(sugg, i))),
+      el('div', { class: 'flex items-center gap-2' }, [
+        el('button', { type: 'button', title: 'Attach video', class: 'p-2 rounded-xl bg-neutral-100 text-neutral-600 hover:bg-neutral-200 transition', onclick: () => homeFileInput.click() }, [icon('external-link', 'w-4 h-4')]),
+        homeInput, btn('Send', { kind: 'primary', class: 'rounded-xl px-4 py-2 text-xs font-bold transition border-none shadow-none', onclick: sendHome }), homeFileInput,
+      ]),
+    ]);
+    wrap.appendChild(el('div', { class: 'mx-4 mt-4 rounded-2xl border border-violet-100 bg-violet-50 p-4' }, [
+      el('h2', { class: 'text-sm font-semibold text-violet-900', text: 'About Pro' }),
+      el('p', { class: 'mt-1 text-xs leading-relaxed text-violet-800', text: 'A future Pro tier may include faster cloud transcription, larger models, and priority AI generation. Clippi is fully usable locally today.' }),
+      el('div', { class: 'mt-3 flex flex-wrap gap-2' }, [
+        el('button', { type: 'button', class: 'rounded-full bg-white px-3 py-1.5 text-xs font-semibold text-violet-800', text: 'New project', onclick: () => startNewProjectFromHome({ type: 'text', text: '' }) }),
+        el('button', { type: 'button', class: 'rounded-full bg-white px-3 py-1.5 text-xs font-semibold text-violet-800', text: 'Open settings', onclick: () => State.set({ screen: 'settings' }) }),
+      ]),
+    ]));
+    wrap.appendChild(composerNode);
+  }
+
+  if (s.ui.homeTab === 'projects') {
+    wrap.appendChild(el('div', { class: 'px-4 mt-6 flex items-center justify-between' }, [
+      el('h2', { class: 'text-sm font-semibold text-neutral-700', text: 'Projects' }),
+    ]));
+    const listWrap = el('div', { class: 'px-4 mt-3 flex flex-col gap-2' });
+    if (!s.projects.length) {
+      listWrap.appendChild(emptyState('film', 'No projects yet', 'Start your first one by describing your cut on the Home tab.'));
+    } else {
+      s.projects.forEach((p) => listWrap.appendChild(ProjectCard(p)));
+    }
+    wrap.appendChild(listWrap);
+  }
+  wrap.appendChild(HomeBottomNav());
+  return wrap;
+}
+function HomeNewDrawer() {
+  const blank = el('div', { class: 'flex items-center justify-between px-2 py-1.5 rounded-xl hover:bg-neutral-50 cursor-pointer transition', onclick: () => { State.set({ ui: { ...S().ui, homeNewMenuOpen: false } }); startNewProjectFromHome({ type: 'text', text: '' }); } }, [
+    el('div', { class: 'flex items-center gap-3' }, [el('div', { class: 'w-8 h-8 rounded-lg bg-blue-50 text-blue-600 grid place-items-center' }, [icon('plus-circle', 'w-4 h-4')]), el('div', {}, [el('div', { class: 'text-xs font-bold text-neutral-900', text: 'Blank Project' }), el('div', { class: 'text-[10px] text-neutral-500', text: 'Standard 16:9 timeline canvas' })])]),
+    el('kbd', { class: 'px-1.5 py-0.5 bg-neutral-100 border border-neutral-200 rounded text-[9px] font-mono text-neutral-500', text: '⌘N' })
+  ]);
+  const ai = el('div', { class: 'flex items-center justify-between px-2 py-1.5 rounded-xl hover:bg-neutral-50 cursor-pointer transition', onclick: () => { State.set({ ui: { ...S().ui, homeTab: 'home', homeNewMenuOpen: false } }); setTimeout(() => document.getElementById('home-composer-input')?.focus(), 50); } }, [
+    el('div', { class: 'flex items-center gap-3' }, [el('div', { class: 'w-8 h-8 rounded-lg bg-purple-50 text-purple-600 grid place-items-center' }, [icon('wand-sparkles', 'w-4 h-4')]), el('div', {}, [el('div', { class: 'text-xs font-bold text-neutral-900', text: 'AI Prompt to Video' }), el('div', { class: 'text-[10px] text-neutral-500', text: 'Auto-cut from prompt script' })])]),
+    el('kbd', { class: 'px-1.5 py-0.5 bg-neutral-100 border border-neutral-200 rounded text-[9px] font-mono text-neutral-500', text: '⌘I' })
+  ]);
+  return el('div', { class: 'w-full bg-white rounded-2xl p-4 shadow-xl border border-neutral-200 space-y-2 mb-3' }, [el('div', { class: 'w-8 h-1 rounded-full bg-neutral-300 mx-auto mb-2' }), blank, ai]);
+}
+function HomeBottomNav() {
+  const s = S(), isOp = !!s.ui.homeNewMenuOpen, isH = s.ui.homeTab === 'home';
+  const navBtn = (t, ic, act) => el('button', { type: 'button', title: t, class: 'relative p-2 rounded-lg transition ' + (act ? 'bg-neutral-100 text-neutral-900' : 'text-neutral-400 hover:text-neutral-700 hover:bg-neutral-50'), onclick: () => State.set({ ui: { ...S().ui, homeTab: t.toLowerCase() } }) }, [icon(ic, 'w-4 h-4'), act ? el('span', { class: 'absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-rose-500 ring-2 ring-white' }) : null]);
+  const actionBtn = isOp
+    ? el('button', { type: 'button', class: 'flex items-center gap-2 px-3 py-1.5 rounded-lg bg-neutral-900 text-white text-xs font-semibold hover:bg-neutral-800 transition', onclick: () => State.set({ ui: { ...S().ui, homeNewMenuOpen: false } }) }, [icon('chevron-down', 'w-3.5 h-3.5'), el('span', { text: 'Dismiss' })])
+    : el('button', { type: 'button', class: 'flex items-center gap-2 px-3 py-1.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-white text-xs font-semibold transition', onclick: () => State.set({ ui: { ...S().ui, homeNewMenuOpen: true } }) }, [icon('plus', 'w-3.5 h-3.5'), el('span', { text: 'New' }), el('kbd', { class: 'px-1 py-0.5 rounded text-[9px] bg-neutral-800 text-neutral-300 font-mono', text: '⌘N' })]);
+  const bar = el('nav', { class: 'flex items-center gap-4 px-5 py-2.5 bg-white border border-neutral-200 rounded-xl shadow-sm' }, [navBtn('Home', 'home', isH), navBtn('Projects', 'folders', !isH), el('div', { class: 'w-px h-6 bg-neutral-200' }), actionBtn]);
+  if (!isOp) return el('div', { class: 'fixed bottom-4 left-1/2 z-20 -translate-x-1/2' }, [bar]);
+  const bg = el('div', { class: 'fixed inset-0 z-10 bg-black/20 backdrop-blur-[1px]', onclick: () => State.set({ ui: { ...S().ui, homeNewMenuOpen: false } }) });
+  return el('div', {}, [bg, el('div', { class: 'fixed bottom-4 left-1/2 z-20 -translate-x-1/2 w-[min(calc(100%-2rem),22rem)] flex flex-col items-center' }, [HomeNewDrawer(), bar])]);
+}
+function emptyState(ic, title, body) {
+  return el("div", { class: "rounded-xl border border-dashed border-neutral-300 bg-white/60 p-8 text-center" }, [
+    el("div", { class: "mx-auto mb-2 text-2xl text-neutral-400 w-fit" }, [icon(ic)]),
+    el("p", { class: "font-medium text-neutral-700", text: title }),
+    el("p", { class: "mt-1 text-sm text-neutral-500", text: body }),
+  ]);
+}
+function ProjectCard(p) {
+  const s = S();
+  if (s.ui.confirmDeleteId === p.id) {
+    return el('div', { class: 'rounded-3xl border border-red-200 bg-red-50 p-4 shadow-sm' }, [
+      el("p", { class: "text-sm text-red-700", text: "Delete “" + p.name + "” and all its data?" }),
+      el("div", { class: "mt-2 flex gap-2" }, [
+        btn("Confirm delete", { kind: "danger", icon: "trash-2", onclick: () => Bus.emit("project:delete", p.id) }),
+        btn("Cancel", { onclick: () => State.set({ ui: { ...s.ui, confirmDeleteId: null } }) }),
+      ]),
+    ]);
+  }
+  if (s.ui.renamingId === p.id) {
+    const inp = el("input", { type: "text", value: p.name, maxlength: "60", class: "flex-1 rounded-lg border border-neutral-300 px-2 py-1.5 text-sm outline-none focus:border-neutral-500" });
+    const e2 = el("p", { class: "text-xs text-red-600 mt-1 hidden" });
+    const save = () => { if (!inp.value.trim()) { e2.textContent = "Name is required."; e2.classList.remove("hidden"); return; } Bus.emit("project:rename", { id: p.id, name: inp.value }); };
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+    setTimeout(() => inp.focus(), 0);
+    return el('div', { class: 'rounded-3xl border border-neutral-200 bg-white p-4 shadow-sm' }, [
+      el('div', { class: 'flex items-center gap-2' }, [inp, btn('Save', { kind: 'primary', onclick: save }), btn('Cancel', { onclick: () => State.set({ ui: { ...s.ui, renamingId: null } }) })]),
+      e2,
+    ]);
+  }
+  const isBusy = p.status === 'processing', actions = s.ui.confirmDeleteId === 'menu-' + p.id;
+  const avatar = el('div', { class: 'w-14 h-14 rounded-2xl flex items-center justify-center shrink-0 shadow-xs ' + (isBusy ? 'bg-blue-600 text-white animate-pulse' : 'bg-neutral-900 text-white') }, [icon(isBusy ? 'audio-waveform' : 'film', 'w-6 h-6')]);
+  const statusPill = el('span', { class: 'text-[9px] font-bold px-2 py-0.5 rounded-full uppercase ' + (isBusy ? 'bg-blue-100 text-blue-800' : p.status === 'ready' ? 'bg-emerald-100 text-emerald-700' : 'bg-neutral-100 text-neutral-700'), text: isBusy ? 'BUSY' : p.status.toUpperCase() });
+  const openBtn = el('button', { type: 'button', class: 'px-3 py-1 text-white rounded-lg text-xs font-bold ' + (isBusy ? 'bg-blue-600 hover:bg-blue-700' : 'bg-neutral-900 hover:bg-neutral-800'), onclick: () => Bus.emit('project:open', p.id) }, [el('span', { text: 'Open' })]);
+  const renameBtn = el('button', { type: 'button', title: 'Rename', class: 'p-1 text-neutral-400 hover:text-neutral-900', onclick: () => State.set({ ui: { ...s.ui, renamingId: p.id } }) }, [icon('pencil', 'w-4 h-4')]);
+  const moreBtn = el('button', { type: 'button', title: 'Project actions', class: 'p-1 text-neutral-400 hover:text-neutral-900', onclick: () => State.set({ ui: { ...s.ui, confirmDeleteId: actions ? null : 'menu-' + p.id } }) }, [icon('more-horizontal', 'w-4 h-4')]);
+  const content = el('div', { class: 'flex-1 min-w-0' }, [
+    el('div', { class: 'flex items-center gap-2' }, [el('h3', { class: 'font-extrabold text-sm text-neutral-900 truncate', text: p.name }), statusPill]),
+    el('p', { class: 'text-xs mt-0.5 ' + (isBusy ? 'text-blue-700 font-semibold' : 'text-neutral-400'), text: isBusy ? 'Transcribing Speech...' : 'Updated ' + new Date(p.updatedAt).toLocaleDateString() }),
+    el('div', { class: 'mt-2 flex items-center gap-2' }, [openBtn, renameBtn, moreBtn]),
+
+
+
+    actions ? el('div', { class: 'mt-2 border-t border-neutral-100 pt-2 flex items-center justify-between' }, [btn('Delete', { kind: 'danger', icon: 'trash-2', onclick: () => State.set({ ui: { ...s.ui, confirmDeleteId: p.id } }) })]) : null,
+  ]);
+  return el('div', { class: 'rounded-3xl border bg-white p-4 shadow-sm flex items-center gap-4 ' + (isBusy ? 'border-blue-200' : 'border-neutral-200') }, [avatar, content]);
+}
+
+function MenuScreen() {
+  const s = S(), back = s.currentProject ? "editor" : "home";
+  const wrap = el("div", { class: "min-h-screen max-w-md mx-auto bg-white px-6 py-8" });
+  wrap.appendChild(el("div", { class: "flex items-center justify-between" }, [
+    el("h1", { class: "text-3xl font-bold", text: "Menu" }),
+    el("button", { type: "button", title: "Close menu", class: "grid h-10 w-10 place-items-center rounded-full bg-neutral-100", onclick: () => State.set({ screen: back }) }, [icon("x")]),
+  ]));
+  const row = (label, onclick, disabled = false) => el("button", { type: "button", disabled, class: "mt-4 flex w-full items-center justify-between rounded-full bg-neutral-100 px-6 py-4 text-left text-sm font-semibold disabled:opacity-40", onclick }, [el("span", { text: label }), icon("chevron-right", "h-4 w-4")]);
+  wrap.appendChild(el("div", { class: "mt-10" }, [
+    row("API Keys", () => State.set({ screen: "settings" })),
+    row("Transcript", () => { if (s.currentProject) State.set({ screen: "editor", ui: { ...s.ui, autoExpandTranscript: true } }); }, !s.currentProject),
+    !s.currentProject ? el("p", { class: "mt-2 px-5 text-xs text-neutral-500", text: "Open a project first to view its transcript." }) : null,
+  ]));
+  wrap.appendChild(el("div", { class: "fixed bottom-8 flex items-center gap-3 text-sm text-neutral-600" }, [icon("user-circle"), el("span", { text: "Local device" })]));
+  return wrap;
+}
+
+/* ============================ UI: SETTINGS ============================ */
+function SettingsScreen() {
+  const s = S(), st = s.settings || DEFAULT_SETTINGS;
+  const wrap = el("div", { class: "max-w-md mx-auto pb-24" });
+  wrap.appendChild(header("Settings", "Engines and keys are stored locally in this browser.", [
+    btn("Back", { icon: "arrow-left", onclick: () => State.set({ screen: s.currentProject ? "editor" : "home" }) }),
+  ]));
+  const section = (title, children) => el("section", { class: "px-4 mt-4" }, [
+    el("h2", { class: "text-sm font-semibold text-neutral-700 mb-2", text: title }),
+    el("div", { class: "rounded-xl border border-neutral-200 bg-white p-3 shadow-sm flex flex-col gap-3" }, children),
+  ]);
+  const engineOption = (value, label, desc, disabled) => el("button", {
+    type: "button", disabled,
+    class: `w-full text-left rounded-xl border p-3 transition ${st.transcriptionEngine === value ? "border-neutral-900 bg-neutral-50" : "border-neutral-200 hover:bg-neutral-50"} ${disabled ? "opacity-50 cursor-not-allowed" : ""}`,
+    onclick: () => Bus.emit("settings:update", { transcriptionEngine: value }),
+  }, [
+    el("div", { class: "flex items-center gap-2" }, [
+      icon(st.transcriptionEngine === value ? "circle-dot" : "circle", "text-neutral-500"),
+      el("span", { class: "font-medium text-sm", text: label }),
+    ]),
+    el("p", { class: "mt-1 text-xs text-neutral-500 pl-6", text: desc }),
+  ]);
+  const gpuNote = el("p", { class: "text-xs text-neutral-500", text: "Detecting WebGPU support…" });
+  hasWebGPU().then((ok) => { gpuNote.textContent = ok ? "WebGPU detected in this browser." : "WebGPU is unavailable here; WASM will be used automatically."; });
+
+  wrap.appendChild(section("Transcription engine", [
+    engineOption("webgpu", "WebGPU Whisper", "Fastest local option. Runs on your GPU, fully offline once the model is cached."),
+    engineOption("wasm", "WASM Whisper", "Works everywhere. Slower, but no GPU required and fully offline."),
+    engineOption("cloud", "Cloud (BYOK)", "Uses your own OpenAI or Groq key. Fastest for long videos, requires network."),
+    gpuNote,
+  ]));
+
+  const sizeRow = el("div", { class: "flex gap-2" }, ["tiny", "base", "small"].map((sz) =>
+    el("button", {
+      type: "button",
+      class: `flex-1 rounded-xl border px-3 py-2 text-sm capitalize ${st.preferredModelSize === sz ? "border-neutral-900 bg-neutral-50 font-medium" : "border-neutral-200"}`,
+      text: sz, onclick: () => Bus.emit("settings:update", { preferredModelSize: sz }),
+    })));
+  wrap.appendChild(section("Local model size", [sizeRow, el("p", { class: "text-xs text-neutral-500", text: "Larger models are more accurate and take longer to download and run." })]));
+
+  const provRow = el("div", { class: "flex gap-2" }, ["openai", "groq"].map((pv) =>
+    el("button", {
+      type: "button",
+      class: `flex-1 rounded-xl border px-3 py-2 text-sm capitalize ${st.cloudProvider === pv ? "border-neutral-900 bg-neutral-50 font-medium" : "border-neutral-200"}`,
+      text: pv, onclick: () => Bus.emit("settings:update", { cloudProvider: pv }),
+    })));
+  const keyInput = el("input", { type: "password", value: st.cloudApiKey || "", placeholder: "sk-…", class: "w-full rounded-xl border border-neutral-200 px-3 py-2 text-sm outline-none focus:border-neutral-400" });
+  const keyErr = el("p", { class: "text-xs text-red-600 hidden" });
+  wrap.appendChild(section("Cloud transcription key (BYOK)", [
+    provRow, keyInput, keyErr,
+    el("p", { class: "text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2", text: "This key is stored only in your browser and is not secret-safe; anyone with access to this device or browser storage can read it." }),
+    el("div", { class: "flex gap-2" }, [
+      btn("Save key", {
+        kind: "primary", icon: "save", onclick: () => {
+          const v = keyInput.value.trim();
+          if (!v || v.length < 20 || /\s/.test(v)) { keyErr.textContent = "That does not look like a valid API key."; keyErr.classList.remove("hidden"); return; }
+          keyErr.classList.add("hidden");
+          Bus.emit("settings:update", { cloudApiKey: v, cloudProvider: st.cloudProvider || "openai" });
+        },
+      }),
+      btn("Clear API key", { kind: "danger", icon: "eraser", onclick: () => { keyInput.value = ""; Bus.emit("settings:update", { cloudApiKey: "" }); } }),
+    ]),
+  ]));
+
+  const llmProvRow = el("div", { class: "flex gap-2" }, ["openai", "groq"].map((pv) =>
+    el("button", {
+      type: "button",
+      class: `flex-1 rounded-xl border px-3 py-2 text-sm capitalize ${(st.llmProvider || "openai") === pv ? "border-neutral-900 bg-neutral-50 font-medium" : "border-neutral-200"}`,
+      text: pv, onclick: () => Bus.emit("settings:update", { llmProvider: pv }),
+    })));
+  const llmKey = el("input", { type: "password", value: st.llmApiKey || "", placeholder: "Key for AI cut generation", class: "w-full rounded-xl border border-neutral-200 px-3 py-2 text-sm outline-none focus:border-neutral-400" });
+  const llmModel = el("input", { type: "text", value: st.llmModel || "", placeholder: "Model (optional, e.g. gpt-4o-mini)", class: "w-full rounded-xl border border-neutral-200 px-3 py-2 text-sm outline-none focus:border-neutral-400" });
+  const llmErr = el("p", { class: "text-xs text-red-600 hidden" });
+  wrap.appendChild(section("AI cut generation key (BYOK)", [
+    llmProvRow, llmKey, llmModel, llmErr,
+    el("p", { class: "text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2", text: "Stored only in your browser and not secret-safe. Leave empty to reuse the transcription key when providers match." }),
+    el("div", { class: "flex gap-2" }, [
+      btn("Save", {
+        kind: "primary", icon: "save", onclick: () => {
+          const v = llmKey.value.trim();
+          if (v && (v.length < 20 || /\s/.test(v))) { llmErr.textContent = "That does not look like a valid API key."; llmErr.classList.remove("hidden"); return; }
+          llmErr.classList.add("hidden");
+          Bus.emit("settings:update", { llmApiKey: v, llmModel: llmModel.value.trim() });
+        },
+      }),
+      btn("Clear", { kind: "danger", icon: "eraser", onclick: () => { llmKey.value = ""; Bus.emit("settings:update", { llmApiKey: "" }); } }),
+    ]),
+  ]));
+  return wrap;
+}
+
+/* ============================ UI: EDITOR ============================ */
+let videoEl = null, videoURL = null, videoURLAssetId = null;
+/* Module-level playback state shared by the persistent <video> and its one-time listeners. */
+let playRanges = [];          // kept ranges used for cut-skipping (empty = play everything)
+let playHasRemovals = false;  // whether the scrubber/timer show edited (cut) time
+let playDispDur = 1;          // duration shown on the timer (edited duration when cuts exist)
+let playBtnRef = null, scrubBarRef = null, scrubFillRef = null, timeLabelRef = null;
+function ensureVideoEl() {
+  const asset = S().currentVideoAsset;
+  if (!asset) return null;
+  // Reuse the same <video> element across global rerenders so playback, position
+  // and buffered data survive State.set() -> render() cycles.
+  if (videoEl && videoURLAssetId === asset.id) return videoEl;
+  if (videoURL) URL.revokeObjectURL(videoURL);
+  videoURL = URL.createObjectURL(asset.blob);
+  videoURLAssetId = asset.id;
+  videoEl = el('video', { src: videoURL, poster: 'data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'640\' height=\'360\'%3E%3Crect width=\'100%25\' height=\'100%25\' fill=\'%23252525\'/%3E%3C/svg%3E', class: 'w-full rounded-lg bg-neutral-900 aspect-video', playsinline: true, disablePictureInPicture: true, controlsList: 'nodownload nofullscreen noremoteplayback' });
+  videoEl.addEventListener('timeupdate', onVideoTimeUpdate);
+  videoEl.addEventListener('play', () => { if (playBtnRef) { playBtnRef.replaceChildren(icon('pause', 'w-3.5 h-3.5 fill-neutral-800')); refreshIcons(); } });
+  videoEl.addEventListener('pause', () => { if (playBtnRef) { playBtnRef.replaceChildren(icon('play', 'w-3.5 h-3.5 fill-neutral-800 ml-0.5')); refreshIcons(); } });
+  return videoEl;
+}
+function onVideoTimeUpdate() {
+  if (!videoEl) return;
+  const t = videoEl.currentTime;
+  // Cut skipping lives here (single place): while playing an edited version,
+  // any position outside a kept range snaps forward to the next kept range.
+  if (playHasRemovals && playRanges.length && !videoEl.paused) {
+    const inKept = playRanges.some((r) => t >= r.start && t < r.end - 0.02);
+    if (!inKept) {
+      const next = playRanges.find((r) => r.start > t);
+      if (next) { videoEl.currentTime = next.start; return; }
+      const lastEnd = playRanges[playRanges.length - 1].end;
+      if (t >= lastEnd - 0.05) { videoEl.pause(); videoEl.currentTime = lastEnd; }
+      return;
+    }
+  }
+  const cur = playHasRemovals ? getEditedTime(t, playRanges) : t;
+  if (scrubBarRef) scrubBarRef.value = String(cur);
+  if (scrubFillRef) scrubFillRef.style.width = Math.min(100, Math.max(0, (cur / (playDispDur || 1)) * 100)) + '%';
+  if (timeLabelRef) timeLabelRef.textContent = fmt(cur) + ' / ' + fmt(playDispDur);
+  highlightActiveSegment(t);
+}
+function togglePlay() {
+  if (!videoEl) return;
+  if (!videoEl.paused) { videoEl.pause(); return; }
+  // Resume in place when possible; only reposition when the playhead is not inside a kept range.
+  if (playHasRemovals && playRanges.length) {
+    const t = videoEl.currentTime;
+    const inKept = playRanges.some((r) => t >= r.start && t < r.end - 0.02);
+    if (!inKept) {
+      const lastEnd = playRanges[playRanges.length - 1].end;
+      if (t >= lastEnd - 0.05) videoEl.currentTime = playRanges[0].start;   // finished: replay from start
+      else { const next = playRanges.find((r) => r.end > t + 0.02); videoEl.currentTime = next ? Math.max(t, next.start) : playRanges[0].start; }
+    }
+  }
+  videoEl.play().catch(() => {});
+}
+function EditorScreen() {
+  const s = S();
+  const wrap = el('div', { class: 'max-w-md md:max-w-6xl mx-auto pb-40' });
+  wrap.appendChild(header(s.currentProject ? s.currentProject.name : 'Editor', '', [
+    btn('', { icon: 'undo-2', title: 'Undo', disabled: !s.history.undoStack.length, onclick: () => Bus.emit('edit:undo') }),
+    btn('', { icon: 'redo-2', title: 'Redo', disabled: !s.history.redoStack.length, onclick: () => Bus.emit('edit:redo') }),
+    btn('', { icon: 'layout-grid', title: 'Menu', onclick: () => State.set({ screen: 'menu' }) }),
+    btn('', { icon: 'home', title: 'Home', onclick: () => { State.set({ screen: 'home', currentProject: null, ui: { ...S().ui, homeCreateOpen: false, renamingId: null } }); refreshProjects(); } }),
+  ], 'sticky top-0 z-30 bg-[#f7f7f6]'));
+  wrap.appendChild(el('div', { class: 'sticky top-16 z-20 bg-[#f7f7f6] px-4 pb-2' }, [MediaBar()]));
+  wrap.appendChild(el('div', { class: 'px-4 flex flex-col gap-4 mt-2' }, [ActivityFeed(), Composer()]));
+  if (s.ui.cutsSheetOpenForMessageId) wrap.appendChild(CutsBottomSheet());
+  if (s.ui.autoExpandTranscript) setTimeout(() => State.set({ ui: { ...S().ui, autoExpandTranscript: false, expandedFeedItems: { ...S().ui.expandedFeedItems, transcript: true } } }), 0);
+  return wrap;
+}
+function RenderControl(vidNode, transportRow) {
+  const s = S(), exp = s.exportState;
+  const isExp = exp.status === 'rendering', isDone = exp.status === 'done';
+  const pct = isDone ? 100 : Math.min(100, Math.max(0, Math.round((exp.progress || 0) * 100)));
+  const borderStyle = isDone ? 'background:#000000;' : isExp ? 'background:conic-gradient(from 0deg at 50% 50%, #000000 ' + pct + '%, #e5e5e5 ' + pct + '% 100%);' : 'background:#e5e5e5;';
+  const options = [{ id: '4K (2160p)', label: '4K UHD (60fps)', size: '~110 MB' }, { id: '1080p (FHD)', label: '1080p FHD (60fps)', size: '~42 MB' }, { id: '720p (HD)', label: '720p HD (30fps)', size: '~18 MB' }, { id: '480p (SD)', label: '480p SD (30fps)', size: '~8 MB' }, { id: 'Vertical (9:16)', label: '1080x1920 (9:16)', size: '~32 MB' }];
+  const curRes = s.ui.renderResolution || '1080p (FHD)';
+  const dropOpen = !!s.ui.renderResDropdownOpen && !isExp;
+  const selectorBtn = el('button', { type: 'button', class: 'inline-flex items-center gap-1 text-xs font-semibold text-neutral-800 hover:text-black transition ' + (isExp ? 'opacity-40 pointer-events-none' : ''), onclick: (e) => { e.stopPropagation(); State.set({ ui: { ...S().ui, renderResDropdownOpen: !dropOpen } }); } }, [el('span', { text: curRes }), icon('chevron-down', 'w-3 h-3 text-neutral-400')]);
+  const menuItems = options.map((opt) => el('button', { type: 'button', class: 'w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between transition ' + (curRes === opt.id ? 'bg-neutral-900 text-white font-bold' : 'text-neutral-700 hover:bg-neutral-50'), onclick: (e) => { e.stopPropagation(); State.set({ ui: { ...S().ui, renderResolution: opt.id, renderResDropdownOpen: false } }); } }, [el('span', { text: opt.id }), el('span', { class: 'text-[10px] opacity-60 font-mono', text: opt.size })]));
+  const dropMenu = dropOpen ? el('div', { class: 'absolute right-0 z-50 mt-1 w-44 rounded-xl bg-white border border-neutral-200 shadow-xl p-1', onclick: (e) => e.stopPropagation() }, menuItems) : null;
+  const topBar = el('div', { class: 'flex items-center justify-between pb-1' }, [el('span', { class: 'text-xs font-bold text-neutral-900', text: 'Render Cut' }), el('div', { class: 'relative inline-block text-left' }, [selectorBtn, dropMenu])]);
+  const frame = el('div', { class: 'relative p-[3px] rounded-2xl transition-all duration-75 overflow-hidden', style: borderStyle }, [vidNode]);
+  let bottomAction = null;
+  if (isExp) {
+    const stageTxt = pct < 25 ? 'Chunking audio' : pct < 55 ? 'Scanning speech' : pct < 85 ? 'Encoding video' : 'Packaging MP4';
+    bottomAction = el('div', { class: 'w-full flex flex-col items-center gap-1.5 pt-1' }, [
+      el('div', { class: 'w-full flex justify-between items-center text-xs font-semibold text-neutral-800' }, [el('span', { text: stageTxt }), el('span', { class: 'font-mono font-bold', text: pct + '%' })]),
+      el('button', { type: 'button', class: 'text-xs font-semibold text-neutral-400 hover:text-black transition flex items-center gap-1 pt-1', onclick: () => Bus.emit('export:cancel') }, [icon('x', 'w-3 h-3'), el('span', { text: 'Cancel render' })])
+    ]);
+  } else if (isDone) {
+    bottomAction = el('div', { class: 'w-full flex flex-col items-center gap-1 pt-1' }, [
+      el('div', { class: 'text-xs font-bold text-neutral-900 flex items-center gap-1.5' }, [icon('check', 'w-3.5 h-3.5 stroke-[3] text-neutral-900'), el('span', { text: 'Render Complete · Saved' })]),
+      el('button', { type: 'button', class: 'text-xs text-neutral-500 hover:text-black font-semibold underline mt-0.5', onclick: () => State.set({ exportState: { status: 'idle', progress: 0, url: null } }) }, [el('span', { text: 'Reset' })])
+    ]);
+  } else {
+    bottomAction = el('div', { class: 'w-full flex flex-col items-center gap-2 pt-1' }, [
+      el('button', { type: 'button', class: 'w-full h-10 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-white text-xs font-bold flex items-center justify-center gap-2 shadow-xs transition active:scale-[0.99]', onclick: () => Bus.emit('export:start') }, [icon('clapperboard', 'w-3.5 h-3.5'), el('span', { text: 'Render Video' })])
+    ]);
+  }
+  return el('div', { class: 'flex flex-col gap-2.5 py-1' }, [topBar, frame, transportRow, bottomAction]);
+}
+function CutsBottomSheet() {
+  const s = S(), msg = s.chatMessages.find(m => m.id === s.ui.cutsSheetOpenForMessageId);
+  if (!msg) return el('div');
+  return el('div', { class: 'fixed inset-x-0 bottom-0 z-40 flex flex-col rounded-t-3xl border border-neutral-200 bg-white shadow-[0_-4px_24px_rgba(0,0,0,0.15)] h-[85vh] max-w-md md:max-w-6xl mx-auto overflow-hidden' }, [
+    el('div', { class: 'flex items-center justify-between px-4 py-3 border-b border-neutral-100 bg-neutral-50' }, [ 
+      el('h2', { class: 'font-semibold text-sm text-neutral-900', text: 'Cuts for: ' + msg.content.slice(0, 30) + '...' }),
+      btn('', { icon: 'x', title: 'Close', onclick: () => State.set({ ui: { ...S().ui, cutsSheetOpenForMessageId: null } }) })
+    ]),
+    el('div', { class: 'flex-1 overflow-y-auto p-4 flex flex-col gap-4 pb-32 bg-white' }, [ VideoPanel(), el('div', { class: 'border-t border-neutral-100' }), VersionsPanel(msg.relatedVersionIds) ])
+  ]);
+}
+
+function MediaBar() {
+  const s = S();
+  if (!s.currentVideoAsset) {
+    const fileInput = el("input", { type: "file", accept: "video/*", class: "hidden", onchange: (e) => { const f = e.target.files[0]; if (f) Bus.emit("video:import", f); } });
+    return el("div", { class: "flex min-h-[18rem] cursor-pointer flex-col items-center justify-center gap-3 text-center", onclick: () => fileInput.click() }, [
+      el("p", { class: "text-lg font-medium text-neutral-500", text: "Hey, what's your video today?" }),
+      s.ui.crossOriginWarning ? el("p", { class: "max-w-xs text-xs text-neutral-400", text: "Some browsers or embedded previews restrict audio processing. If import gets stuck, open this app in a full browser tab." }) : null,
+      fileInput,
+    ]);
+  }
+  const expanded = !!s.ui.mediaBarExpanded;
+  const status = s.processing.stage ? stageLabel(s.processing) : s.currentProject?.status === 'ready' ? 'Ready' : 'Imported';
+  const optMenu = el('div', { class: 'relative shrink-0', onclick: (e) => e.stopPropagation() }, [
+    btn('', { icon: 'more-vertical', title: 'Options', class: 'h-7 w-7 p-0 justify-center border-none shadow-none text-neutral-400 hover:text-neutral-700 bg-transparent hover:bg-neutral-100 rounded-md', onclick: () => State.set({ ui: { ...S().ui, mediaMenuOpen: !s.ui.mediaMenuOpen } }) }),
+    s.ui.mediaMenuOpen ? el('div', { class: 'absolute right-0 top-full mt-1 w-40 rounded-xl border border-neutral-200 bg-white shadow-lg z-50 p-1 flex flex-col' }, [
+      btn('Replace video', { icon: 'repeat', class: 'w-full justify-start border-none shadow-none text-left', onclick: () => { State.set({ ui: { ...S().ui, mediaMenuOpen: false } }); document.querySelector('[data-media-replace]')?.click(); } }),
+      btn('Delete video', { icon: 'trash-2', kind: 'danger', class: 'w-full justify-start border-none shadow-none text-left', onclick: () => { State.set({ ui: { ...S().ui, mediaMenuOpen: false } }); Bus.emit('video:remove'); } })
+    ]) : null
+  ]);
+  const trigger = el('button', { type: 'button', class: 'w-full flex items-center justify-between p-3.5 hover:bg-neutral-50 transition text-left cursor-pointer select-none', onclick: () => State.set({ ui: { ...S().ui, mediaBarExpanded: !expanded, mediaMenuOpen: false } }) }, [
+    el('div', { class: 'flex items-center gap-3 min-w-0 flex-1 pr-2' }, [
+      el('div', { class: 'w-7 h-7 rounded-md bg-neutral-100 grid place-items-center text-neutral-700 shrink-0' }, [icon('panel-right', 'w-4 h-4')]),
+      el('div', { class: 'min-w-0 flex-1' }, [el('p', { class: 'text-xs font-medium text-neutral-900 truncate', text: s.currentVideoAsset.fileName }), el('p', { class: 'text-[10px] text-neutral-400', text: status + ' · Click row to ' + (expanded ? 'collapse' : 'open preview drawer') })])
+    ]),
+    el('div', { class: 'flex items-center gap-1 shrink-0' }, [optMenu, icon(expanded ? 'chevron-up' : 'chevron-down', 'w-4 h-4 text-neutral-400 transition-transform duration-200')])
+  ]);
+  const body = expanded ? el('div', { class: 'border-t border-neutral-100 p-4 space-y-3 bg-neutral-50/30 transition-all duration-200' }, [VideoPanel()]) : null;
+  const replaceInput = el('input', { 'data-media-replace': '', type: 'file', accept: 'video/*', class: 'hidden', onchange: (e) => { const f = e.target.files[0]; if (f) Bus.emit('video:replace', f); } });
+  return el('section', { class: 'rounded-lg border border-neutral-200 bg-white shadow-xs overflow-hidden' }, [trigger, replaceInput, body]);
+}
+function StepTimerBadge(startTime, cls = 'tabular-nums') {
+  const node = el('span', { class: cls, text: Math.max(0, Math.floor((Date.now() - (startTime || Date.now())) / 1000)) + 's' });
+  const update = () => { if (!node.isConnected) return; node.textContent = Math.max(0, Math.floor((Date.now() - (startTime || Date.now())) / 1000)) + 's'; setTimeout(update, 1000); };
+  setTimeout(update, 1000);
+  return node;
+}
+function ThoughtChip(open, onToggle, detail) {
+  return el('div', { class: 'mt-3' }, [
+    el('button', { type: 'button', class: 'inline-flex items-center gap-1.5 rounded-full bg-neutral-100 px-3 py-1.5 text-xs text-neutral-600', onclick: onToggle }, [icon('pencil', 'h-3 w-3'), el('span', { text: 'Thought for 0s' }), icon(open ? 'chevron-up' : 'chevron-down', 'h-3 w-3')]),
+    open && detail ? el('p', { class: 'mt-2 rounded-xl bg-neutral-50 px-3 py-2 text-xs text-neutral-500', text: detail }) : null,
+  ]);
+}
+function TickingThoughtChip(startTime) {
+  const node = el('div', { class: 'inline-flex items-center gap-1.5 rounded-full bg-neutral-100 px-3 py-1.5 text-xs text-neutral-600 w-fit' }, [icon('rotate-cw', 'h-3 w-3 animate-spin'), el('span', { text: 'Thinking...' })]);
+  const update = () => { if (!node.isConnected) return; node.children[1].textContent = 'Thought for ' + Math.floor((Date.now() - startTime) / 1000) + 's'; setTimeout(update, 1000); };
+  setTimeout(update, 1000);
+  return node;
+}
+function AudioPipelineCard() {
+  const s = S(), pipeOpen = s.ui.pipelineExpanded !== false;
+  const isBusy = !!s.processing.stage, isDone = !!s.transcript.length, isExt = s.processing.stage === 'extracting', isTr = s.processing.stage === 'transcribing';
+  const st1 = isDone || isBusy ? 'done' : 'pending';
+  const st2 = isDone || isTr ? 'done' : isExt ? 'active' : 'pending';
+  const st3 = isDone ? 'done' : isTr ? 'active' : 'pending';
+  const pRow = (ic, lbl, st, dur, activeLbl) => {
+    if (st === 'done') return el('div', { class: 'flex items-center gap-2.5 px-3.5 py-2 rounded-2xl bg-indigo-50/40 border border-indigo-100/60 text-xs font-semibold text-indigo-900/60' }, [icon('check-circle-2', 'w-4 h-4 text-indigo-600 shrink-0'), el('span', { class: 'flex-1 truncate', text: lbl }), el('span', { class: 'text-[11px] font-bold text-indigo-400 tabular-nums', text: dur })]);
+    if (st === 'active') return el('div', { class: 'flex items-center gap-3 px-4 py-3 rounded-2xl bg-indigo-600 text-white shadow-lg shadow-indigo-200' }, [el('div', { class: 'w-8 h-8 rounded-xl bg-white/20 flex items-center justify-center shrink-0 animate-pulse' }, [icon(ic, 'w-4 h-4 text-white')]), el('span', { class: 'flex-1 text-sm font-black', text: activeLbl || lbl }), StepTimerBadge(s.processing.startedAt, 'text-xs font-black bg-white text-indigo-700 px-2.5 py-1 rounded-full tabular-nums')]);
+    return el('div', { class: 'flex items-center gap-2.5 px-3 py-1.5 text-xs font-medium text-neutral-300' }, [icon(ic, 'w-3.5 h-3.5 text-neutral-300 shrink-0'), el('span', { class: 'flex-1', text: lbl }), el('span', { class: 'text-[11px]', text: 'up next' })]);
+  };
+  const head = el('div', { class: 'flex items-center justify-between pb-3 border-b border-neutral-100 mb-3.5' }, [
+    el('div', { class: 'flex items-center gap-2' }, [icon('columns-2', 'w-4 h-4 text-neutral-900 shrink-0'), el('span', { class: 'text-xs font-black tracking-wide text-neutral-950', text: 'Clippi AI Studio' })]),
+    el('div', { class: 'flex items-center gap-1.5' }, [
+      isBusy ? btn('Stop', { icon: 'square', class: 'rounded-2xl text-xs font-black bg-red-50 hover:bg-red-100 text-red-700 border-none px-3 py-1.5 active:scale-90', onclick: () => { Media.cancel(); State.set({ processing: { stage: null, progress: 0, engine: null, message: '', gesturePrompt: false }, errors: { ...S().errors, transcribe: 'Transcription cancelled. Retry when ready.' } }); } }) : btn(isDone ? 'Restart' : 'Start', { icon: 'rotate-cw', class: 'rounded-2xl text-xs font-black bg-neutral-100 hover:bg-neutral-200 text-neutral-800 border-none px-3 py-1.5 active:scale-90', onclick: () => runTranscription() }),
+      el('button', { type: 'button', title: 'Toggle pipeline', class: 'p-1 rounded-xl text-neutral-400 hover:text-neutral-700', onclick: () => State.set({ ui: { ...S().ui, pipelineExpanded: !pipeOpen } }) }, [icon(pipeOpen ? 'chevron-up' : 'chevron-down', 'w-4 h-4')])
+    ])
+  ]);
+  const allRows = [pRow('audio-waveform', 'Audio checked', st1, '1s', 'Check audio'), pRow('music', 'Audio extracted', st2, 'done', 'Extract audio'), pRow('file-text', 'Transcribed — ' + s.transcript.length + ' segments generated', st3, 'ready', 'Transcript script')];
+  const activeIdx = st3 === 'active' || isDone ? 2 : st2 === 'active' ? 1 : 0;
+  const displayedRows = pipeOpen ? allRows : [allRows[activeIdx]];
+  return el('div', { class: 'rounded-xl border border-neutral-200 bg-transparent p-4 text-neutral-800' }, [
+    head, el('div', { class: 'space-y-2.5 mb-2' }, displayedRows),
+    s.processing.gesturePrompt ? el('div', { class: 'mt-3 rounded-2xl border-2 border-indigo-200 bg-indigo-50 p-3' }, [btn('Tap to start audio processing', { kind: 'primary', icon: 'play', class: 'w-full justify-center rounded-2xl font-black text-xs', onclick: () => runTranscription() })]) : null,
+    s.errors.transcribe ? el('div', { class: 'mt-3' }, [errorBox(s.errors.transcribe, () => runTranscription())]) : null
+  ]);
+}
+
+
+
+
+
+
+function ChatFeedItem(m) {
+  const s = S(), related = s.chatMessages.find((x) => x.role === 'assistant' && x.createdAt > m.createdAt);
+  const isBusy = s.ui.chatBusy && !related && m.id === s.chatMessages.filter(x=>x.role==='user').slice(-1)[0].id;
+  const errorText = (s.ui.chatErrors || {})[m.id] || (!related && !isBusy ? 'Interrupted — retry' : null);
+  const isEd = s.ui.editingMsgId === m.id, isOp = s.ui.msgActionOpen === m.id;
+  let t;
+  const evts = { ontouchstart: () => { t = setTimeout(() => State.set({ ui: { ...S().ui, msgActionOpen: m.id } }), 500); }, ontouchend: () => clearTimeout(t), ontouchmove: () => clearTimeout(t), oncontextmenu: (e) => { e.preventDefault(); State.set({ ui: { ...S().ui, msgActionOpen: m.id } }); } };
+  const actRow = (isOp && !isEd) ? el('div', { class: 'flex justify-end gap-2 mt-1 px-2' }, [ btn('', { icon: 'copy', title: 'Copy', class: 'p-1 text-xs', onclick: () => { navigator.clipboard.writeText(m.content); toast('Copied.', 'ok'); State.set({ ui: { ...S().ui, msgActionOpen: null } }); } }), btn('', { icon: 'pencil', title: 'Edit', class: 'p-1 text-xs', onclick: () => State.set({ ui: { ...S().ui, editingMsgId: m.id, msgActionOpen: null } }) }), btn('', { icon: 'trash-2', kind: 'danger', title: 'Delete', class: 'p-1 text-xs', onclick: () => deleteMessageAndAfter(s.currentProject.id, m.id) }) ]) : null;
+  let editBox = null;
+  if (isEd) {
+    const inp = el('textarea', { class: 'w-full rounded-2xl border p-2.5 text-sm text-neutral-900', rows: '2' }); inp.value = m.content;
+    editBox = el('div', { class: 'w-full' }, [ inp, el('div', { class: 'mt-1 flex justify-end gap-2' }, [ btn('Cancel', { class: 'rounded-2xl', onclick: () => State.set({ ui: { ...S().ui, editingMsgId: null } }) }), btn('Save', { kind: 'primary', class: 'rounded-2xl font-black text-xs', onclick: () => { const v = inp.value; deleteMessageAndAfter(s.currentProject.id, m.id).then(() => Bus.emit('chat:send', v)); } }) ]) ]);
+  }
+  const userBubble = el('div', { class: 'flex flex-col' }, [ el('div', { class: 'flex justify-end' }, [ isEd ? editBox : el('div', { ...evts, class: 'max-w-[85%] rounded-3xl bg-neutral-900 px-4 py-2.5 text-sm font-medium text-white text-left whitespace-pre-wrap cursor-pointer transition active:scale-[0.98] shadow-sm', text: m.content }) ]), actRow ]);
+  const steps = [{ lbl: 'Analyzing instruction', ic: 'sparkles' }, { lbl: 'Generating cut versions', ic: 'scissors' }, { lbl: 'Edit generation complete', ic: 'check-circle-2' }];
+  const logRows = steps.map((st, i) => {
+    if (related) return el('div', { class: 'flex items-center gap-2.5 px-3.5 py-1.5 rounded-2xl bg-neutral-50 text-xs font-medium text-neutral-500' }, [icon('check', 'w-3.5 h-3.5 text-indigo-600 shrink-0'), el('span', { class: 'flex-1 truncate', text: st.lbl }), el('span', { class: 'text-[11px] font-bold text-neutral-400 tabular-nums', text: 'done' })]);
+    if (isBusy && i === 1) return el('div', { class: 'flex items-center gap-3 px-4 py-2.5 rounded-2xl bg-white border-2 border-neutral-950 text-neutral-950 font-black text-xs shadow-sm' }, [icon('scissors', 'w-4 h-4 text-neutral-950 animate-pulse'), el('span', { class: 'flex-1', text: st.lbl }), StepTimerBadge(m.createdAt, 'bg-neutral-950 text-white px-2 py-0.5 rounded-full tabular-nums')]);
+    if (isBusy && i === 0) return el('div', { class: 'flex items-center gap-2.5 px-3.5 py-1.5 rounded-2xl bg-neutral-50 text-xs font-medium text-neutral-500' }, [icon('check', 'w-3.5 h-3.5 text-indigo-600 shrink-0'), el('span', { class: 'flex-1 truncate', text: st.lbl }), el('span', { class: 'text-[11px] font-bold text-neutral-400 tabular-nums', text: 'done' })]);
+    return null;
+  }).filter(Boolean);
+  const resultCard = related ? el('button', { type: 'button', class: 'mt-1 flex w-full items-center justify-between gap-3 rounded-2xl bg-neutral-950 p-4 text-white shadow-md hover:bg-neutral-900 transition active:scale-[0.99]', onclick: () => State.set({ ui: { ...S().ui, cutsSheetOpenForMessageId: m.id } }) }, [el('div', { class: 'flex items-center gap-2.5 min-w-0' }, [icon('columns-2', 'w-4 h-4 text-white shrink-0'), el('p', { class: 'text-xs font-black truncate', text: m.content.slice(0, 42) })]), el('span', { class: 'inline-flex items-center gap-0.5 text-xs font-black text-white hover:underline shrink-0' }, [el('span', { text: 'View cuts' }), icon('chevron-right', 'w-4 h-4')])]) : null;
+  return el('div', { class: 'py-2 flex flex-col gap-2.5' }, [userBubble, el('div', { class: 'space-y-2' }, logRows), errorText ? errorBox(errorText, () => Bus.emit('chat:send', m.content)) : null, resultCard]);
+}
+
+
+
+
+function ActivityFeed() {
+  const s = S(), feed = [];
+  if (s.currentVideoAsset) feed.push(AudioPipelineCard());
+  if (s.transcript.length) feed.push(TranscriptPanel());
+  s.chatMessages.filter((m) => m.role === 'user').forEach((m) => feed.push(ChatFeedItem(m)));
+  if (!feed.length) return el('div', { class: 'hidden' });
+  return el('div', { class: 'flex flex-col gap-3 pb-36' }, feed);
+}
+function buildSuggestions() {
+    const s = S();
+    const suggestions = [];
+    suggestions.push({ label: 'Remove silent parts', pId: 'silent' });
+    if (s.currentVideoAsset && s.currentVideoAsset.duration > 60) {
+      suggestions.push({ label: 'Clip within 60 sec', pId: '60sec' });
+    }
+    if (s.transcript.length > 20) {
+      suggestions.push({ label: 'Find highlights', text: 'Find the highlights and remove fluff' });
+    } else if (s.transcript.length > 10) {
+      suggestions.push({ label: 'Make it a short', text: 'cut this down to a vertical short under 60 seconds' });
+    }
+    return suggestions;
+  }
+function Composer() {
+  const s = S();
+  const input = el('textarea', { rows: '1', placeholder: 'Type your changes', class: 'min-w-0 flex-1 resize-none rounded-full border-0 bg-neutral-100 px-4 py-2.5 text-sm text-neutral-900 placeholder-neutral-500 outline-none focus:ring-2 focus:ring-neutral-300', onkeydown: (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } } });
+  const send = () => { if (input.value.trim()) { const v = input.value; input.value = ''; Bus.emit('chat:send', v); } };
+  const fileInput = el('input', { type: 'file', accept: 'video/*', class: 'hidden', onchange: (e) => { const f = e.target.files[0]; if (f) Bus.emit(s.currentVideoAsset ? 'video:replace' : 'video:import', f); } });
+  const presetText = { silent: 'Remove silent parts', noise: 'Cut filler words like umm and hmm', '60sec': 'Clip this within 60 seconds', repeat: 'Remove repeated/redundant lines' };
+  const preset = (label, ic, pId, active) => el('button', { type: 'button', title: pId === 'silent' ? 'Removes video where there is no speech (silence), not spoken words.' : label, class: (active ? 'rounded-full bg-neutral-900 text-white px-3 py-1 text-xs font-semibold hover:bg-neutral-800 transition flex items-center gap-1 shrink-0' : 'rounded-full bg-neutral-100 text-neutral-700 hover:bg-neutral-200 px-3 py-1 text-xs font-semibold transition flex items-center gap-1 shrink-0'), onclick: () => { input.value = presetText[pId] || label; input.focus(); } }, [icon(ic, 'w-3 h-3 ' + (active ? '' : 'text-neutral-500')), el('span', { text: label })]);
+  return el('div', { class: 'fixed bottom-3 left-1/2 z-30 w-[min(calc(100%-2rem),42rem)] -translate-x-1/2 rounded-2xl border border-neutral-200 bg-white p-3 shadow-md space-y-2.5' }, [
+    el('div', { class: 'flex items-center gap-2 overflow-x-auto flex-nowrap pb-1.5' }, [preset('Remove silent parts', 'volume-x', 'silent', true), preset('Cut umm, hmm', 'mic-off', 'noise', false), preset('Clip within 60 sec', 'timer', '60sec', false), preset('Remove repetitions', 'repeat-2', 'repeat', false)]),
+    el('div', { class: 'flex items-center gap-2' }, [
+      el('button', { type: 'button', title: 'Attach video', class: 'p-2 rounded-xl bg-neutral-100 text-neutral-600 hover:bg-neutral-200 transition', onclick: () => fileInput.click() }, [icon('external-link', 'w-4 h-4')]),
+      input, btn('Send', { kind: 'primary', class: 'rounded-xl px-4 py-2 text-xs font-bold transition border-none shadow-none', disabled: s.ui.chatBusy, onclick: send }), fileInput,
+    ]),
+  ]);
+}
+function card(title, right, children, cls = "") {
+  return el("section", { class: "rounded-xl border border-neutral-200 bg-white shadow-sm " + cls }, [
+    title ? el("div", { class: "flex items-center justify-between border-b border-neutral-100 px-3 py-2" }, [
+      el("h2", { class: "text-sm font-semibold text-neutral-700", text: title }),
+      el("div", { class: "flex items-center gap-1.5" }, right || []),
+    ]) : null,
+    el("div", { class: "p-3" }, children),
+  ]);
+}
+
+function VideoPanel() {
+  const s = S();
+  if (!s.currentVideoAsset) return el("div");
+  const vid = ensureVideoEl();
+  const ranges = s.activeVersionId ? keptRanges(s.activeVersionId) : [];
+  const editedDur = ranges.reduce((n, r) => n + (r.end - r.start), 0);
+  const totalDur = s.transcript.length ? s.transcript[s.transcript.length - 1].end : (s.currentVideoAsset.duration || 1);
+  const hasRemovals = editedDur > 0 && editedDur < totalDur - 0.1;
+  const dispDur = hasRemovals ? editedDur : totalDur;
+  // Sync module playback state read by the persistent element's listeners.
+  playRanges = ranges; playHasRemovals = hasRemovals; playDispDur = dispDur;
+  const cur = hasRemovals ? getEditedTime(vid.currentTime, ranges) : vid.currentTime;
+  const pct = Math.min(100, Math.max(0, (cur / (dispDur || 1)) * 100));
+  const time = el('span', { class: 'text-xs font-mono text-neutral-500 tabular-nums shrink-0', text: fmt(cur) + ' / ' + fmt(dispDur) });
+  const fill = el('div', { class: 'h-full bg-neutral-900 transition-all', style: 'width:' + pct + '%' });
+  const track = el('div', { class: 'w-full h-1 bg-neutral-200 rounded-full overflow-hidden' }, [fill]);
+  const bar = el('input', { type: 'range', min: '0', max: String(Math.max(1, dispDur)), step: '0.01', value: String(cur), class: 'v58-range absolute inset-0 w-full h-full opacity-0 cursor-pointer' });
+  const scrubberWrap = el('div', { class: 'relative flex-1 flex items-center' }, [track, bar]);
+  const play = btn('', { icon: vid.paused ? 'play' : 'pause', title: 'Play/pause', class: 'h-8 w-8 rounded-full border border-neutral-200 bg-white hover:bg-neutral-50 text-neutral-800 p-0 justify-center shadow-xs transition active:scale-95 shrink-0', onclick: togglePlay });
+  playBtnRef = play; scrubBarRef = bar; scrubFillRef = fill; timeLabelRef = time;
+  bar.addEventListener('input', () => {
+    const v = Number(bar.value);
+    fill.style.width = Math.min(100, Math.max(0, (v / (dispDur || 1)) * 100)) + '%';
+    time.textContent = fmt(v) + ' / ' + fmt(dispDur);
+    vid.currentTime = hasRemovals ? getRawTime(v, ranges) : v;
+  });
+  const transportRow = el('div', { class: 'flex items-center gap-3 pt-1' }, [play, scrubberWrap, time]);
+  return RenderControl(vid, transportRow);
+}
+function ProcessingPanel() {
+  const s = S();
+  const items = [];
+  if (s.processing.stage) {
+    items.push(el("div", { class: "rounded-xl border border-neutral-200 bg-white p-3 shadow-sm" }, [
+      el("div", { class: "flex items-center gap-2 text-sm font-medium text-neutral-700" }, [icon("rotate-cw", "animate-spin"), el("span", { text: stageLabel(s.processing) })]),
+      
+      s.processing.message ? el("p", { class: "mt-1 text-xs text-neutral-500", text: s.processing.message }) : null,
+      el("div", { class: "mt-2" }, [btn("Cancel", { kind: "danger", icon: "x", onclick: () => { Media.cancel(); State.set({ processing: { stage: null, progress: 0, engine: null, message: "" } }); toast("Processing cancelled.", "info"); } })]),
+    ]));
+  }
+  if (s.errors.transcribe) {
+    items.push(errorBox(s.errors.transcribe, () => runTranscription()));
+  }
+  if (s.exportState.status === "rendering") {
+    items.push(el("div", { class: "rounded-xl border border-neutral-200 bg-white p-3 shadow-sm" }, [
+      el("div", { class: "flex items-center gap-2 text-sm font-medium" }, [icon("rotate-cw", "animate-spin"), el("span", { text: "Rendering export" })]),
+      
+      el("div", { class: "mt-2" }, [btn("Cancel render", { kind: "danger", icon: "x", onclick: () => Bus.emit("export:cancel") })]),
+    ]));
+  }
+  if (s.exportState.status === "error") items.push(errorBox("Export failed. Try again with a shorter selection.", () => Bus.emit("export:start")));
+  return items.length ? el("div", { class: "flex flex-col gap-3" }, items) : el("div", { class: "hidden" });
+}
+function stageLabel(p) {
+  const map = { uploading: "Storing video", extracting: "Extracting audio", transcribing: "Transcribing with " + (p.engine || "engine"), exporting: "Rendering export" };
+  return map[p.stage] || "Working";
+}
+function progressBar(v) {
+  return el("div", { class: "mt-2 h-1.5 w-full rounded-full bg-neutral-100 overflow-hidden" }, [
+    el("div", { class: "h-full bg-neutral-900 transition-all", style: "width:" + Math.round((v || 0) * 100) + "%" }),
+  ]);
+}
+function errorBox(msg, retry) {
+  return el('div', { class: 'rounded-2xl border-2 border-red-100 bg-red-50/70 p-3.5 shadow-sm' }, [
+    el('div', { class: 'flex items-start gap-2.5 text-xs font-semibold text-red-700' }, [icon('alert-triangle', 'mt-0.5 text-red-500 shrink-0'), el('span', { class: 'flex-1 leading-relaxed', text: msg })]),    retry ? el('div', { class: 'mt-2.5 flex justify-end' }, [btn('Retry', { icon: 'rotate-cw', class: 'rounded-2xl text-xs font-black bg-red-100 hover:bg-red-200 text-red-800 border-none', onclick: retry })]) : null,
+  ]);
+}
+
+function TimelinePanel() {
+  const s = S();
+  if (!s.transcript.length) return el("div", { class: "hidden" });
+  const total = s.transcript[s.transcript.length - 1].end || 1;
+  const m = s.activeVersionId ? keepMapFor(s.activeVersionId) : new Map();
+  const strip = el("div", { class: "flex h-6 w-full overflow-hidden rounded-lg border border-neutral-200" },
+    s.transcript.map((t) => el("button", {
+      type: "button", title: fmt(t.start) + " — " + t.text.slice(0, 60),
+      class: ((m.get(t.id) || "keep") === "keep" ? "bg-neutral-800 hover:bg-neutral-700" : "bg-neutral-200 hover:bg-neutral-300"),
+      style: "flex:" + Math.max(0.4, t.end - t.start),
+      onclick: () => seekTo(t.start),
+    })));
+  const kept = keptRanges(s.activeVersionId || "").reduce((n, r) => n + (r.end - r.start), 0);
+  return card("Timeline", [], [
+    strip,
+    el("p", { class: "mt-2 text-xs text-neutral-500", text: "Kept " + fmt(kept) + " of " + fmt(total) + " · dark = keep, light = removed" }),    el('div', { class: 'mt-2 flex flex-wrap gap-2' }, [
+      btn('Export cut', { kind: 'primary', icon: 'clapperboard', disabled: s.exportState.status === 'rendering', onclick: () => Bus.emit('export:start') })
+    ]),
+  ]);
+}
+
+function VersionsPanel(versionIds = null) {
+  const s = S();
+  const list = versionIds ? s.editVersions.filter(v => versionIds.includes(v.id)) : s.editVersions;
+  if (!list.length) return el("div", { class: "hidden" });
+  const rows = list.map((v) => {
+    if (s.ui.confirmDeleteVersionId === v.id) {
+      return el("div", { class: "rounded-xl border border-red-200 bg-red-50 p-3" }, [
+        el("p", { class: "text-sm text-red-700", text: "Delete “" + v.label + "”?" }),
+        el("div", { class: "mt-2 flex gap-2" }, [
+          btn("Confirm", { kind: "danger", onclick: () => Bus.emit("version:delete", v.id) }),
+          btn("Cancel", { onclick: () => State.set({ ui: { ...s.ui, confirmDeleteVersionId: null } }) }),
+        ]),
+      ]);
+    }
+    const segs = s.editSegmentsByVersion[v.id] || [];
+    const kept = segs.filter((e) => e.action === "keep").length;
+    const dur = keptRanges(v.id).reduce((n, r) => n + (r.end - r.start), 0);
+    const active = s.activeVersionId === v.id;
+    return el("div", { class: `rounded-xl border p-3 ${active ? "border-neutral-900 bg-neutral-50" : "border-neutral-200"}` }, [
+      el("div", { class: "flex items-center gap-2" }, [
+        icon(active ? "circle-dot" : "circle", "text-neutral-500"),
+        el("span", { class: "flex-1 text-sm font-medium", text: v.label }),
+        btn("", { icon: "trash-2", kind: "danger", title: "Delete version", onclick: () => State.set({ ui: { ...s.ui, confirmDeleteVersionId: v.id } }) }),
+      ]),
+      el("p", { class: "mt-1 text-xs text-neutral-500", text: "Keeps " + kept + " of " + segs.length + " segments · " + fmt(dur) }),
+      el("div", { class: "mt-2 flex flex-wrap gap-2" }, [
+        btn(active ? "Active" : "Use this version", { kind: active ? "subtle" : "primary", icon: "check", disabled: active, onclick: () => Bus.emit("version:select", v.id) }),
+        btn("Preview", { icon: "play-circle", onclick: () => previewVersion(v.id) }),
+      ]),
+      v.parentVersionId ? el("p", { class: "mt-1 text-[11px] text-neutral-400", text: "Refined from an earlier version" }) : null,
+    ]);
+  });
+  return card("Versions", [
+    btn(s.ui.compare ? "Stack" : "Compare", { icon: "columns-2", onclick: () => State.set({ ui: { ...s.ui, compare: !s.ui.compare } }) }),
+  ], [el("div", { class: s.ui.compare ? "grid gap-3 sm:grid-cols-2" : "flex flex-col gap-3" }, rows)]);
+}
+function previewVersion(versionId) {
+  if (!videoEl) return;
+  const ranges = keptRanges(versionId);
+  if (!ranges.length) { toast('This version keeps nothing to preview.', 'info'); return; }
+  // Point the consolidated timeupdate skipper at this version's ranges and play.
+  playRanges = ranges;
+  playHasRemovals = true;
+  playDispDur = ranges.reduce((n, r) => n + (r.end - r.start), 0) || 1;
+  if (scrubBarRef) scrubBarRef.max = String(Math.max(1, playDispDur));
+  videoEl.currentTime = ranges[0].start;
+  videoEl.play().catch(() => {});
+}
+function seekTo(t) { if (videoEl) { videoEl.currentTime = t; videoEl.play().catch(() => {}); } }
+function highlightActiveSegment(time) {
+  const list = S().transcript, mode = S().ui.transcriptViewMode || 'lines';
+  const seg = list.find((s) => time >= s.start && time < s.end);
+  document.querySelectorAll("[data-seg]").forEach((n) => n.classList.remove("seg-active"));
+  document.querySelectorAll("[data-word]").forEach((n) => n.classList.remove("bg-indigo-200", "text-indigo-950", "font-bold"));
+  if (!seg) return;
+  const node = document.querySelector(`[data-seg="${seg.id}"]`);
+  if (node) node.classList.add("seg-active");
+  if (mode === 'words' && seg.words && seg.words.length) {
+    const wi = seg.words.findIndex((w) => time >= w.start && time < w.end);
+    if (wi >= 0) {
+      const wNode = document.querySelector(`[data-word="${seg.id}-${wi}"]`);
+      if (wNode) {
+        wNode.classList.add("bg-indigo-200", "text-indigo-950", "font-bold");
+        const p = node && node.parentElement;
+        if (p && p.scrollHeight > p.clientHeight) p.scrollTop = wNode.offsetTop - p.offsetTop - 60;
+        return;
+      }
+    }
+  }
+  if (node) { const p = node.parentElement; if (p && p.scrollHeight > p.clientHeight) p.scrollTop = node.offsetTop - p.offsetTop - 60; }
+}
+
+function TranscriptPanel() {
+  const s = S();
+  const isExp = !!(s.ui.expandedFeedItems && s.ui.expandedFeedItems.transcript);
+  const mode = s.ui.transcriptViewMode || 'lines';
+  const modeToggle = el('div', { class: 'flex items-center gap-1 rounded-xl bg-neutral-100 p-1 mb-2.5 w-fit' }, [
+    el('button', { type: 'button', class: 'px-3 py-1 rounded-lg text-xs font-semibold transition ' + (mode === 'lines' ? 'bg-white text-neutral-900 shadow-xs' : 'text-neutral-500 hover:text-neutral-800'), text: 'Lines', onclick: () => State.set({ ui: { ...S().ui, transcriptViewMode: 'lines' } }) }),
+    el('button', { type: 'button', class: 'px-3 py-1 rounded-lg text-xs font-semibold transition ' + (mode === 'words' ? 'bg-white text-neutral-900 shadow-xs' : 'text-neutral-500 hover:text-neutral-800'), text: 'Words', onclick: () => State.set({ ui: { ...S().ui, transcriptViewMode: 'words' } }) })
+  ]);
+  const searchInput = el("input", { type: "search", value: s.search.q, placeholder: "Search transcript", class: "w-full rounded-xl border border-neutral-200 px-3 py-2 text-sm outline-none focus:border-neutral-400" });
+  searchInput.addEventListener("input", debounce((e) => {
+    const q = e.target.value.trim().toLowerCase();
+    const matches = q ? S().transcript.filter((t) => t.text.toLowerCase().includes(q)).map((t) => t.id) : [];
+    State.set({ search: { q: e.target.value, matches, cursor: 0 } });
+  }, 300));
+
+  const body = el("div", { class: "mt-2 flex flex-col gap-1.5 max-h-[28rem] overflow-y-auto relative" });
+  if (!s.transcript.length) {
+    body.appendChild(emptyState("file-text", "No transcript yet", s.currentVideoAsset ? "Run transcription to generate segments." : "Import a video to generate a transcript."));
+  } else {
+    const q = s.search.q.trim().toLowerCase();
+    const visible = s.transcript;
+    if (q && !s.search.matches.length) body.appendChild(el("p", { class: "text-sm text-neutral-500 p-3", text: "No segments match “" + s.search.q + "”." }));
+    visible.forEach((t) => body.appendChild(SegmentRow(t, q)));
+  }
+
+  const right = [];
+  if (s.search.matches.length) right.push(btn(s.search.cursor + 1 + "/" + s.search.matches.length, {
+    icon: "chevron-down", onclick: () => {
+      const cur = (s.search.cursor + 1) % s.search.matches.length;
+      State.set({ search: { ...s.search, cursor: cur } });
+      const t = S().transcript.find((x) => x.id === s.search.matches[cur]);
+      if (t) seekTo(t.start);
+    },
+  }));
+  if (s.currentVideoAsset) right.push(btn("", { icon: "rotate-cw", title: "Re-run transcription", disabled: !!s.processing.stage, onclick: () => runTranscription() }));
+  right.push(btn("", { icon: isExp ? "chevron-up" : "chevron-down", title: isExp ? "Collapse" : "Expand", onclick: () => State.set({ ui: { ...S().ui, expandedFeedItems: { ...S().ui.expandedFeedItems, transcript: !isExp } } }) }));
+  const selectionBar = s.selectedSegmentIds.length ? el("div", { class: "mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-neutral-200 bg-neutral-50 p-2" }, [
+    el("span", { class: "text-xs text-neutral-600", text: s.selectedSegmentIds.length + " selected" }),
+    btn("Keep", { icon: "check", onclick: () => Bus.emit("edit:apply", { segmentIds: s.selectedSegmentIds, action: "keep" }) }),
+    btn("Remove", { icon: "scissors", kind: "danger", onclick: () => Bus.emit("edit:apply", { segmentIds: s.selectedSegmentIds, action: "remove" }) }),
+    btn("Clear", { onclick: () => State.set({ selectedSegmentIds: [] }) }),
+  ]) : null;  const head = el("div", { class: "flex items-center justify-between px-3 py-2 " + (isExp ? "border-b border-neutral-100" : "") }, [
+    el("div", { class: "flex items-center gap-2" }, [el("h2", { class: "text-sm font-semibold text-neutral-700", text: "Transcript" }), !isExp ? el("span", { class: "text-xs text-neutral-400", text: s.transcript.length + " segments" }) : null]),
+    el("div", { class: "flex items-center gap-1.5" }, right), 
+  ]);
+  return el("section", { class: "rounded-xl border border-neutral-200 bg-white shadow-sm" }, isExp ? [head, el("div", { class: "p-3" }, [modeToggle, searchInput, selectionBar, body])] : [head]);
+}
+function SegmentRow(t, q) {
+  const s = S(), mode = s.ui.transcriptViewMode || 'lines';
+  const action = s.activeVersionId ? (keepMapFor(s.activeVersionId).get(t.id) || "keep") : "keep";
+  const selected = s.selectedSegmentIds.includes(t.id);
+  let textNode;
+  if (mode === 'words' && t.words && t.words.length) {
+    textNode = el('div', { class: 'flex flex-wrap items-center gap-1 text-sm leading-relaxed ' + (action === 'remove' ? 'opacity-40 line-through' : 'text-neutral-800') });
+    t.words.forEach((w, wi) => {
+      const wSpan = el('span', { 'data-word': t.id + '-' + wi, class: 'rounded px-1 py-0.5 transition cursor-pointer hover:bg-neutral-100', text: w.text, onclick: (e) => { e.stopPropagation(); seekTo(w.start); } });
+      textNode.appendChild(wSpan);
+      const nextW = t.words[wi + 1];
+      if (nextW && (nextW.start - w.end >= 0.3)) {
+        const gapSec = +(nextW.start - w.end).toFixed(1);
+        textNode.appendChild(el('span', { title: 'Silence gap', class: 'inline-flex items-center gap-0.5 rounded-full bg-neutral-200/80 px-1.5 py-0.2 text-[9px] font-mono text-neutral-600' }, [icon('volume-x', 'w-2.5 h-2.5'), el('span', { text: gapSec + 's' })]));
+      }
+    });
+  } else {
+    textNode = el("p", { class: "text-sm leading-snug " + (action === "remove" ? "text-neutral-400 line-through" : "text-neutral-800") });
+    if (q && t.text.toLowerCase().includes(q)) {
+      const idx = t.text.toLowerCase().indexOf(q);
+      textNode.appendChild(document.createTextNode(t.text.slice(0, idx)));
+      textNode.appendChild(el("mark", { text: t.text.slice(idx, idx + q.length) }));
+      textNode.appendChild(document.createTextNode(t.text.slice(idx + q.length)));
+    } else textNode.textContent = t.text;
+  }
+
+  const editBox = () => {
+    const inp = el("textarea", { class: "w-full rounded-lg border border-neutral-300 p-2 text-sm outline-none focus:border-neutral-500", rows: "2" });
+    inp.value = t.text;
+    const e2 = el("p", { class: "text-xs text-red-600 hidden mt-1" });
+    const save = () => { if (!inp.value.trim()) { e2.textContent = "Text is required."; e2.classList.remove("hidden"); return; } Bus.emit("transcript:edit", { id: t.id, text: inp.value }); };
+    const holder = el("div", { class: "mt-1" }, [inp, e2, el("div", { class: "mt-1 flex gap-2" }, [btn("Save", { kind: "primary", onclick: save }), btn("Cancel", { onclick: () => row.replaceChild(textNode, holder) })])]);
+    return holder;
+  };
+
+  const reason = s.activeVersionId ? ((s.editSegmentsByVersion[s.activeVersionId] || []).find((e) => e.transcriptSegmentId === t.id) || {}).reason : null;
+  const row = el("div", {
+    "data-seg": t.id,
+    class: `rounded-xl border p-2 transition ${selected ? "border-neutral-900 bg-neutral-50" : "border-neutral-200 bg-white"}`,
+  }, [
+    el("div", { class: "flex items-center gap-2" }, [
+      el("button", { type: "button", class: "text-[11px] tabular-nums text-neutral-500 hover:text-neutral-900", text: fmt(t.start), onclick: () => seekTo(t.start) }),
+      el("span", { class: "flex-1" }),
+      el("button", { type: "button", title: "Toggle select", class: "text-neutral-400 hover:text-neutral-900", onclick: () => State.set({ selectedSegmentIds: selected ? s.selectedSegmentIds.filter((x) => x !== t.id) : s.selectedSegmentIds.concat([t.id]) }) }, [icon(selected ? "check-square" : "square")]),
+      el("button", { type: "button", title: action === "keep" ? "Mark remove" : "Mark keep", class: "text-neutral-400 hover:text-neutral-900", onclick: () => Bus.emit("edit:apply", { segmentIds: [t.id], action: action === "keep" ? "remove" : "keep" }) }, [icon(action === "keep" ? "scissors" : "rotate-ccw")]),
+      el("button", { type: "button", title: "Edit text", class: "text-neutral-400 hover:text-neutral-900", onclick: () => { const b = editBox(); row.replaceChild(b, textNode); refreshIcons(); } }, [icon("pencil")]),
+      el("button", { type: "button", title: "Split segment", class: "text-neutral-400 hover:text-neutral-900", onclick: () => Bus.emit("transcript:split", t.id) }, [icon("split")]),
+      el("button", { type: "button", title: "Merge with next", class: "text-neutral-400 hover:text-neutral-900", onclick: () => Bus.emit("transcript:merge", t.id) }, [icon("merge")]),
+    ]),
+    textNode,
+    reason ? el("p", { class: "mt-1 text-[11px] text-neutral-400", text: "AI: " + reason }) : null,
+  ]);
+  return row;
+}
+
+function ChatPanel() {
+  const s = S();
+  const list = el("div", { class: "flex flex-col gap-2 max-h-64 overflow-y-auto" });
+  if (!s.chatMessages.length) list.appendChild(emptyState("message-square", "No messages yet", "Describe the edit you want, for example: cut the small talk and keep the product demo."));
+  s.chatMessages.forEach((m) => {
+    list.appendChild(el("div", { class: "flex " + (m.role === "user" ? "justify-end" : "justify-start") }, [
+      el("div", { class: `max-w-[85%] whitespace-pre-wrap rounded-xl border px-3 py-2 text-sm ${m.role === "user" ? "bg-neutral-900 text-white border-neutral-900" : "bg-neutral-50 text-neutral-800 border-neutral-200"}`, text: m.content }),
+    ]));
+  });
+  setTimeout(() => { list.scrollTop = list.scrollHeight; }, 0);
+
+  const input = el("textarea", { rows: "2", placeholder: "Tell Clippi what to cut…", class: "w-full rounded-xl border border-neutral-200 px-3 py-2 text-sm outline-none focus:border-neutral-400" });
+  const inputErr = el("p", { class: "text-xs text-red-600 hidden mt-1" });
+  const send = () => {
+    if (!input.value.trim()) { inputErr.textContent = "Enter an instruction first."; inputErr.classList.remove("hidden"); return; }
+    inputErr.classList.add("hidden");
+    const v = input.value; input.value = "";
+    Bus.emit("chat:send", v);
+  };
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+
+  const children = [list];
+  if (s.ui.chatBusy) children.push(el("div", { class: "mt-2 flex items-center gap-2 text-sm text-neutral-500" }, [icon("rotate-cw", "animate-spin"), el("span", { text: "Generating two alternative cuts…" })]));
+  if (s.errors.ai) children.push(el("div", { class: "mt-2" }, [errorBox(s.errors.ai, null)]));
+  children.push(el("div", { class: "mt-2" }, [input, inputErr, el("div", { class: "mt-1 flex justify-end" }, [btn("Generate cuts", { kind: "primary", icon: "sparkles", disabled: s.ui.chatBusy, onclick: send })])]));
+  return card("AI editor", [], children);
+}
+
+/* ============================ INIT ============================ */
+State.subscribe("*", () => render());
+(async function init() {
+  try {
+    await openDB();
+    const settings = await loadSettings();
+    State.set({ settings, ui: { ...S().ui, crossOriginWarning: !window.crossOriginIsolated } });
+    Bus.emit("engine:detect");
+    await refreshProjects();
+    render();
+    const last = localStorage.getItem("clippi:lastProject");
+    if (last) { const p = await getRecord("projects", last); if (p) await loadProject(last); }
+  } catch (e) {
+    root.replaceChildren(el("div", { class: "max-w-md mx-auto p-6" }, [errorBox(e.message || String(e), () => location.reload())]));
+    refreshIcons();
+  }
+})();
+</script>
+</body>
+</html>
