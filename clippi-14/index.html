@@ -211,7 +211,86 @@ function toast(msg, kind = "info") {
 const DEFAULT_SETTINGS = {
   key: "global", transcriptionEngine: "wasm", cloudProvider: null, cloudApiKey: "",
   preferredModelSize: "base", theme: "light", llmProvider: "openai", llmApiKey: "", llmModel: "", renderEngine: "auto", lastWorkingRenderEngine: null,
+  watermarkDataUrl: null, watermarkEnabled: false,
 };
+
+/* ---------- Export resolution + watermark helpers (shared by all render engines) ---------- */
+const RESOLUTION_PRESETS = {
+  "4K (2160p)":     { h: 2160, bitrate: 40000000 },
+  "1080p (FHD)":    { h: 1080, bitrate: 12000000 },
+  "720p (HD)":      { h: 720,  bitrate: 6000000 },
+  "480p (SD)":      { h: 480,  bitrate: 2500000 },
+  "Vertical (9:16)":{ w: 1080, h: 1920, bitrate: 12000000 },
+};
+const even = (n) => Math.max(2, Math.round(n) - (Math.round(n) % 2));
+/* Fits the source into the chosen preset, preserving aspect ratio (letterboxed for 9:16). */
+function resolveOutputSize(srcW, srcH, resolutionId) {
+  const p = RESOLUTION_PRESETS[resolutionId] || RESOLUTION_PRESETS["1080p (FHD)"];
+  if (p.w) return { width: even(p.w), height: even(p.h), bitrate: p.bitrate, letterbox: true };
+  const height = even(p.h);
+  const width = even(srcW * (height / Math.max(1, srcH)));
+  return { width, height, bitrate: p.bitrate, letterbox: false };
+}
+/* If the device's encoder can't do the requested size, fail loudly instead of
+   silently exporting a different resolution than the user picked. */
+async function assertEncodableSize(out, resolutionId) {
+  if (typeof VideoEncoder === "undefined" || !VideoEncoder.isConfigSupported) return;
+  try {
+    const r = await VideoEncoder.isConfigSupported({ codec: "vp8", width: out.width, height: out.height, bitrate: out.bitrate, framerate: 30 });
+    if (r && r.supported === false) {
+      const err = stageError("loading-engine", new Error("This device's video encoder cannot export at " + (resolutionId || "the selected resolution") + " (" + out.width + "x" + out.height + "). Pick a lower resolution and try again."));
+      err.fatalPreset = true;
+      throw err;
+    }
+  } catch (e) { if (e && e.fatalPreset) throw e; }
+}
+function loadWatermarkImage(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Watermark image could not be loaded."));
+    img.src = dataUrl;
+  });
+}
+/* One reusable canvas: scales each frame into the output size and burns in the
+   watermark at the bottom-right (12% of output width, 4% margin). */
+function makeFrameComposer(width, height, watermarkImg) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
+  let wm = null;
+  if (watermarkImg && watermarkImg.width) {
+    const w = Math.round(width * 0.12);
+    const h = Math.round(w * (watermarkImg.height / watermarkImg.width));
+    const m = Math.round(width * 0.04);
+    wm = { img: watermarkImg, x: width - w - m, y: height - h - m, w, h };
+  }
+  const paint = (src, sw, sh) => {
+    const scale = Math.min(width / Math.max(1, sw), height / Math.max(1, sh));
+    const dw = Math.round(sw * scale), dh = Math.round(sh * scale);
+    const dx = Math.round((width - dw) / 2), dy = Math.round((height - dh) / 2);
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(src, dx, dy, dw, dh);
+    if (wm) { ctx.globalAlpha = 0.9; ctx.drawImage(wm.img, wm.x, wm.y, wm.w, wm.h); ctx.globalAlpha = 1; }
+  };
+  return {
+    canvas,
+    drawElement: (video) => paint(video, video.videoWidth, video.videoHeight),
+    drawSample: (sample) => {
+      if (typeof sample.draw === "function") {
+        // Mediabunny samples paint themselves; letterbox first, then re-draw watermark.
+        ctx.fillStyle = "#000"; ctx.fillRect(0, 0, width, height);
+        sample.draw(ctx, 0, 0, width, height);
+        if (wm) { ctx.globalAlpha = 0.9; ctx.drawImage(wm.img, wm.x, wm.y, wm.w, wm.h); ctx.globalAlpha = 1; }
+      } else {
+        const bmp = sample.toVideoFrame ? sample.toVideoFrame() : sample;
+        paint(bmp, bmp.displayWidth || bmp.codedWidth || width, bmp.displayHeight || bmp.codedHeight || height);
+        if (bmp !== sample && bmp.close) bmp.close();
+      }
+    },
+  };
+}
 async function loadSettings() {
   let s = await getRecord("appSettings", "global");
   if (!s) { s = { ...DEFAULT_SETTINGS, transcriptionEngine: (await hasWebGPU()) ? "webgpu" : "wasm" }; await addRecord("appSettings", s); }
@@ -361,7 +440,8 @@ const Media = {
      the element's captured stream with MediaStreamTrackProcessor, re-times them
      into one continuous timeline and encodes VP8 + Opus into a minimal inline
      WebM muxer. No wasm, no CDN — but realtime, so it takes as long as the cut. */
-  async renderCutWebCodecs(blob, ranges, onProgress, onStage) {
+  async renderCutWebCodecs(blob, ranges, onProgress, onStage, opts) {
+    opts = opts || {};
     const stage = (name) => { this.setStage(name); onStage && onStage(name); };
     stage("loading-engine");
     if (!WEBCODECS_SUPPORTED) throw stageError("loading-engine", new Error("WebCodecs is not supported in this browser."));
@@ -382,8 +462,13 @@ const Media = {
           video.onerror = () => rej(new Error("Could not decode this video in the browser."));
         }), 30000);
       } catch (e) { throw stageError("writing", e); }
-      const width = Math.max(2, video.videoWidth - (video.videoWidth % 2));
-      const height = Math.max(2, video.videoHeight - (video.videoHeight % 2));
+      const srcW = Math.max(2, video.videoWidth - (video.videoWidth % 2));
+      const srcH = Math.max(2, video.videoHeight - (video.videoHeight % 2));
+      const outSize = resolveOutputSize(srcW, srcH, opts.resolution);
+      await assertEncodableSize(outSize, opts.resolution);
+      const width = outSize.width, height = outSize.height;
+      const composer = (width !== srcW || height !== srcH || opts.watermark)
+        ? makeFrameComposer(width, height, opts.watermark) : null;
       let stream, vTrack, aTrack;
       try {
         if (typeof video.requestVideoFrameCallback !== "function") throw new Error("This browser cannot deliver deterministic video frames (requestVideoFrameCallback missing).");
@@ -391,9 +476,9 @@ const Media = {
         vTrack = stream.getVideoTracks()[0];
         aTrack = stream.getAudioTracks()[0];
         vEnc = new VideoEncoder({ output: (c) => takeChunk(1, c), error: (e) => this.pushLog("[clippi] webcodecs video encoder: " + (e.message || e)) });
-        vEnc.configure({ codec: "vp8", width, height, bitrate: 5000000, framerate: 30 });
+        vEnc.configure({ codec: "vp8", width, height, bitrate: outSize.bitrate, framerate: 30 });
         if (aTrack) aEnc = new AudioEncoder({ output: (c) => takeChunk(2, c), error: (e) => this.pushLog("[clippi] webcodecs audio encoder: " + (e.message || e)) });
-        this.pushLog("[clippi] webcodecs engine ready " + width + "x" + height + (aTrack ? " +audio" : " (no audio track)"));
+        this.pushLog("[clippi] webcodecs engine ready " + width + "x" + height + (composer ? " (composited)" : "") + (opts.watermark ? " +watermark" : "") + (aTrack ? " +audio" : " (no audio track)"));
       } catch (e) { throw stageError("loading-engine", e); }
 
       let recording = false, baseUs = 0, rangeT0 = null, frameCount = 0;
@@ -464,7 +549,10 @@ const Media = {
           if (mt >= r.end - 0.001) return finish();
           if (mt >= r.start - 0.001) {
             try {
-              const f = new VideoFrame(video, { timestamp: baseUs + Math.round(Math.max(0, mt - r.start) * 1e6) });
+              const ts = baseUs + Math.round(Math.max(0, mt - r.start) * 1e6);
+              let src = video;
+              if (composer) { composer.drawElement(video); src = composer.canvas; }
+              const f = new VideoFrame(src, { timestamp: ts });
               vEnc.encode(f, { keyFrame: frameCount++ % 60 === 0 });
               f.close();
               times.push(mt);
@@ -531,7 +619,8 @@ const Media = {
   /* ---- Mediabunny engine --------------------------------------------------
      Streams decoded samples of every kept range through Mediabunny's sample
      sinks and re-times them into a single MP4 output. */
-  async renderCutMediabunny(blob, ranges, onProgress, onStage) {
+  async renderCutMediabunny(blob, ranges, onProgress, onStage, opts) {
+    opts = opts || {};
     const stage = (name) => { this.setStage(name); onStage && onStage(name); };
     stage("downloading-engine");
     let MB;
@@ -543,12 +632,19 @@ const Media = {
       const vTrack = await input.getPrimaryVideoTrack();
       const aTrack = await input.getPrimaryAudioTrack();
       if (!vTrack) throw stageError("writing", new Error("No video track found in this file."));
+      const srcW = vTrack.displayWidth || vTrack.codedWidth || 1920;
+      const srcH = vTrack.displayHeight || vTrack.codedHeight || 1080;
+      const out = resolveOutputSize(srcW, srcH, opts.resolution);
+      await assertEncodableSize(out, opts.resolution);
+      const composer = (out.width !== srcW || out.height !== srcH || opts.watermark)
+        ? makeFrameComposer(out.width, out.height, opts.watermark) : null;
       const output = new MB.Output({ format: new MB.Mp4OutputFormat(), target: new MB.BufferTarget() });
-      const vSource = new MB.VideoSampleSource({ codec: "avc", bitrate: MB.QUALITY_HIGH });
+      const vSource = new MB.VideoSampleSource({ codec: "avc", bitrate: out.bitrate });
       output.addVideoTrack(vSource);
       let aSource = null;
       if (aTrack) { aSource = new MB.AudioSampleSource({ codec: "aac", bitrate: MB.QUALITY_MEDIUM }); output.addAudioTrack(aSource); }
       await output.start();
+      this.pushLog("[clippi] mediabunny output " + out.width + "x" + out.height + " @" + Math.round(out.bitrate / 1000) + "kbps" + (opts.watermark ? " +watermark" : ""));
       stage("encoding");
       const vSink = new MB.VideoSampleSink(vTrack);
       const aSink = aTrack ? new MB.AudioSampleSink(aTrack) : null;
@@ -557,10 +653,24 @@ const Media = {
         for (const r of ranges) {
           const len = Math.max(0, r.end - r.start);
           for await (const sample of vSink.samples(r.start, r.end)) {
-            sample.setTimestamp(base + Math.max(0, sample.timestamp - r.start));
-            await vSource.add(sample);
-            sample.close();
-            onProgress && onProgress(Math.min(0.98, (base + Math.max(0, sample.timestamp - base)) / total));
+            const srcTs = sample.timestamp;
+            const ts = base + Math.max(0, srcTs - r.start);
+            if (composer) {
+              let scaled;
+              try {
+                composer.drawSample(sample);
+                scaled = new MB.VideoSample(composer.canvas, { timestamp: ts, duration: sample.duration });
+              } catch (err) { sample.close(); throw new Error("Could not scale/watermark this frame: " + ((err && err.message) || err)); }
+              sample.close();
+              await vSource.add(scaled);
+              scaled.close();
+            } else {
+              sample.setTimestamp(ts);
+              await vSource.add(sample);
+              sample.close();
+            }
+            // Progress from the SOURCE timestamp inside this range, plus the ranges already done.
+            onProgress && onProgress(Math.min(0.98, (base + Math.min(len, Math.max(0, srcTs - r.start))) / total));
           }
           if (aSink && aSource) {
             for await (const sample of aSink.samples(r.start, r.end)) {
@@ -759,7 +869,7 @@ Media.renderCutCloudRun = async function(blob, ranges, onProgress, onStage) {
   });
 };
 
-Media.renderCutAuto = async function(blob, ranges, onProgress, onStage) {
+Media.renderCutAuto = async function(blob, ranges, onProgress, onStage, opts) {
   const engines = [
     { id: "webcodecs", fn: this.renderCutWebCodecs.bind(this) },
     { id: "mediabunny", fn: this.renderCutMediabunny.bind(this) },
@@ -774,8 +884,17 @@ Media.renderCutAuto = async function(blob, ranges, onProgress, onStage) {
   let lastErr = null;
   for (const engine of order) {
     this.pushLog("[clippi] render engine try: " + engine.id);
+    // Progress must never go backwards for the user, including across kept ranges.
+    let seen = 0;
+    const monotonic = (p) => {
+      if (!onProgress) return;
+      const v = Math.max(0, Math.min(1, Number(p) || 0));
+      if (v > seen) seen = v;
+      onProgress(seen);
+    };
+    monotonic(0);
     try {
-      const result = await engine.fn(blob, ranges, onProgress, onStage);
+      const result = await engine.fn(blob, ranges, monotonic, onStage, opts || {});
       await rememberWorkingEngine(engine.id);
       this.pushLog("[clippi] render engine succeeded: " + engine.id);
       return result;
@@ -784,6 +903,7 @@ Media.renderCutAuto = async function(blob, ranges, onProgress, onStage) {
       this.pushLog("[clippi] render engine failed: " + engine.id + " — " + ((e && e.message) || e));
       if (e && e.ffLog) this.pushLog(e.ffLog);
       onStage && onStage((e && e.stage) || "encoding");
+      if (e && e.fatalPreset) throw e;   // resolution can't be honored — don't silently downgrade
     }
   }
   throw lastErr || stageError("encoding", new Error("All render engines failed."));
@@ -1049,30 +1169,96 @@ const AI = {
   },
   async generateVersions(instruction, transcript, priorChat, activePlan) {
     const storyMap = await this.buildStoryMap(transcript);
-    const sys = [
+    const target = parseTargetDuration(instruction);
+    const sysBase = [
       "You are Clippi, a video edit planner. You cut videos by selecting transcript segments.",
       "You NEVER invent timestamps. You only reference the integer segment indexes given to you.",
-      'Reply with STRICT JSON only, shape: {"summary": string, "versionA": {"label": string, "plan": [{"segmentId": number, "action": "keep"|"remove", "reason": string}]}, "versionB": {"label": string, "plan": [...]}}',
+      'Reply with STRICT JSON only, shape: {"summary": string, "versionA": {"label": string, "plan": [{"segmentId": number, "action": "keep"|"remove"|"partial", "removeWordIndices": [number], "reason": string}]}, "versionB": {"label": string, "plan": [...]}}',
       "versionA = Story cut: preserve narrative flow, context and setup, gentle trimming.",
       "versionB = Impact cut: aggressive, keep only the strongest highlight moments, much shorter.",
-      "You may remove partial phrases or individual words within a transcript segment, not only whole segments - split a segment's action at the word level when only part of it should be cut, so the resulting script reads naturally and clearly conveys the speaker's intended point.",
-      "Every transcript segment index MUST appear exactly once in each plan with keep or remove.",
-    ].join(" ");
-    const parts = [];
-    if (storyMap) parts.push("STORY MAP (chunk summaries of a long transcript):\n" + JSON.stringify(storyMap));
-    parts.push("TRANSCRIPT (index|start-end|text):\n" + this.transcriptDigest(transcript));
-    if (activePlan && activePlan.length) parts.push("CURRENT ACTIVE PLAN (segmentId:action):\n" + activePlan.map((p) => p.segmentIndex + ":" + p.action).join(","));
-    if (priorChat && priorChat.length) parts.push("PRIOR CONVERSATION:\n" + priorChat.map((m) => m.role + ": " + m.content).join("\n").slice(-4000));
-    parts.push("INSTRUCTION FROM USER:\n" + instruction);
-    const raw = await this.chat([{ role: "system", content: sys }, { role: "user", content: parts.join("\n\n") }]);
-    const json = this.parseJSON(raw);
-    return validatePlanResponse(json, transcript);
+      'To cut only part of a segment use action "partial" and list the 0-based word positions to drop in removeWordIndices (word positions come from splitting that segment\'s text on spaces). Use "partial" whenever only some words (e.g. filler words) should go, so the script still reads naturally.',
+      "Never remove a segment just because it is quiet or contains a pause unless the user explicitly asked to remove silence or pauses.",
+      "Every transcript segment index MUST appear exactly once in each plan.",
+    ];
+    const runOnce = async (extraConstraint) => {
+      const sys = (extraConstraint ? sysBase.concat([extraConstraint]) : sysBase).join(" ");
+      const parts = [];
+      if (storyMap) parts.push("STORY MAP (chunk summaries of a long transcript):\n" + JSON.stringify(storyMap));
+      parts.push("TRANSCRIPT (index|start-end|text):\n" + this.transcriptDigest(transcript));
+      if (activePlan && activePlan.length) parts.push("CURRENT ACTIVE PLAN (segmentId:action):\n" + activePlan.map((p) => p.segmentIndex + ":" + p.action).join(","));
+      if (priorChat && priorChat.length) parts.push("PRIOR CONVERSATION:\n" + priorChat.map((m) => m.role + ": " + m.content).join("\n").slice(-4000));
+      parts.push("INSTRUCTION FROM USER:\n" + instruction);
+      if (extraConstraint) parts.push("HARD CONSTRAINT:\n" + extraConstraint);
+      const raw = await this.chat([{ role: "system", content: sys }, { role: "user", content: parts.join("\n\n") }]);
+      return validatePlanResponse(this.parseJSON(raw), transcript, instruction);
+    };
+    if (!target) return runOnce(null);
+    const lo = target * 0.9, hi = target * 1.1;
+    const constraint = "The user asked for a " + target + " second cut: versionB's kept segments MUST total between " + Math.round(lo) + " and " + Math.round(hi) + " seconds of video, and versionA must stay close to that target too.";
+    let result = await runOnce(constraint);
+    let kept = planKeptDuration(result.versionB.plan, transcript);
+    if (kept < lo || kept > hi) {
+      // One corrective retry with the measured miss spelled out.
+      const retry = constraint + " Your previous attempt totalled " + kept.toFixed(1) + " seconds, which is wrong — " + (kept > hi ? "remove more segments" : "keep more segments") + " to land inside the required window.";
+      try {
+        const second = await runOnce(retry);
+        const kept2 = planKeptDuration(second.versionB.plan, transcript);
+        if (Math.abs(kept2 - target) < Math.abs(kept - target)) { result = second; kept = kept2; }
+      } catch (e) { console.warn("[clippi] duration retry failed", e); }
+      result.summary += "\n\n(Target " + target + "s — this cut totals about " + kept.toFixed(0) + "s.)";
+    }
+    return result;
   },
 };
 
-function validatePlanResponse(json, transcript) {
+/* "make this a 60 second cut" / "1:30" / "2 minutes" -> seconds, else null. */
+function parseTargetDuration(instruction) {
+  const t = String(instruction || "").toLowerCase();
+  let m = t.match(/(\d+(?:\.\d+)?)\s*(seconds?|secs?|s)\b/);
+  if (m) return Math.round(parseFloat(m[1]));
+  m = t.match(/(\d+(?:\.\d+)?)\s*(minutes?|mins?|m)\b/);
+  if (m) return Math.round(parseFloat(m[1]) * 60);
+  m = t.match(/\b(\d{1,2}):(\d{2})\b/);
+  if (m) return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+  return null;
+}
+function planKeptDuration(plan, transcript) {
+  const byIndex = new Map(transcript.map((s) => [s.index, s]));
+  let d = 0;
+  for (const p of plan) {
+    const s = byIndex.get(p.segmentIndex);
+    if (!s || p.action === "remove") continue;
+    const span = Math.max(0, s.end - s.start);
+    if (p.removeWordIndices && p.removeWordIndices.length && s.words && s.words.length) {
+      d += span * Math.max(0, 1 - p.removeWordIndices.length / s.words.length);
+    } else d += span;
+  }
+  return d;
+}
+/* Detected silence is SHOWN ONLY. Segments that are (mostly) detected silence may
+   never be force-removed by an AI plan unless the user asked for it explicitly. */
+function instructionTargetsSilence(instruction) {
+  return /\b(silence|silent|pause|pauses|dead ?air|gaps?|quiet)\b/i.test(String(instruction || ""));
+}
+function silenceProtectedIndices(transcript) {
+  const out = new Set();
+  let ranges = [];
+  try { ranges = detectSilenceRanges(transcript) || []; } catch (e) { return out; }
+  if (!ranges.length) return out;
+  for (const s of transcript) {
+    const span = Math.max(0.001, s.end - s.start);
+    let overlap = 0;
+    for (const r of ranges) overlap += Math.max(0, Math.min(s.end, r.end) - Math.max(s.start, r.start));
+    if (overlap / span > 0.5) out.add(s.index);
+  }
+  return out;
+}
+
+function validatePlanResponse(json, transcript, instruction) {
   if (!json || typeof json !== "object") throw new Error("AI response had an unexpected shape.");
   const byIndex = new Map(transcript.map((s) => [s.index, s]));
+  const allowSilenceCuts = instructionTargetsSilence(instruction);
+  const protectedIdx = allowSilenceCuts ? new Set() : silenceProtectedIndices(transcript);
   const clean = (v, fallbackLabel) => {
     if (!v || !Array.isArray(v.plan)) throw new Error("AI response is missing a valid edit plan.");
     const seen = new Map();
@@ -1080,12 +1266,22 @@ function validatePlanResponse(json, transcript) {
       if (!item || typeof item !== "object") continue;
       const idx = Number(item.segmentId);
       if (!Number.isFinite(idx) || !byIndex.has(idx)) continue;
-      const action = item.action === "remove" ? "remove" : item.action === "keep" ? "keep" : null;
+      let action = item.action === "remove" ? "remove" : (item.action === "keep" || item.action === "partial") ? "keep" : null;
       if (!action) continue;
-      seen.set(idx, { segmentIndex: idx, action, reason: typeof item.reason === "string" ? item.reason.slice(0, 300) : "" });
+      const seg = byIndex.get(idx);
+      const wordCount = (seg.words && seg.words.length) || 0;
+      let removeWordIndices = [];
+      if (Array.isArray(item.removeWordIndices) && wordCount) {
+        removeWordIndices = [...new Set(item.removeWordIndices.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n >= 0 && n < wordCount))].sort((a, b) => a - b);
+      }
+      if (action === "remove" && removeWordIndices.length && removeWordIndices.length < wordCount) action = "keep";
+      if (action === "keep" && removeWordIndices.length === wordCount && wordCount) action = "remove";
+      // Regression guard: silence-detected ranges are never auto-removed.
+      if (action === "remove" && protectedIdx.has(idx)) { action = "keep"; removeWordIndices = []; }
+      seen.set(idx, { segmentIndex: idx, action, removeWordIndices, reason: typeof item.reason === "string" ? item.reason.slice(0, 300) : "" });
     }
     if (!seen.size) throw new Error("The AI plan did not reference any real transcript segments. Retry with a clearer instruction.");
-    for (const s of transcript) if (!seen.has(s.index)) seen.set(s.index, { segmentIndex: s.index, action: "keep", reason: "" });
+    for (const s of transcript) if (!seen.has(s.index)) seen.set(s.index, { segmentIndex: s.index, action: "keep", removeWordIndices: [], reason: "" });
     const plan = [...seen.values()].sort((a, b) => a.segmentIndex - b.segmentIndex);
     if (!plan.some((p) => p.action === "keep")) throw new Error("The AI plan removed every segment. Retry with a clearer instruction.");
     return { label: typeof v.label === "string" && v.label.trim() ? v.label.trim().slice(0, 60) : fallbackLabel, plan };
@@ -1581,8 +1777,24 @@ Bus.on("chat:send", async (instruction) => {
     const mk = (v, fallback) => {
       const ver = { id: uid(), projectId: proj.id, label: v.label || fallback, createdAt: now(), parentVersionId: parent, sourceInstructionId: userMsg.id };
       const byIndex = new Map(S().transcript.map((t) => [t.index, t]));
-      const segs = v.plan.map((p, i) => ({ id: uid(), editVersionId: ver.id, transcriptSegmentId: byIndex.get(p.segmentIndex).id, action: p.action, reason: p.reason || null, order: i }));
-      return { ver, segs };
+      const words = {};   // { transcriptSegmentId: { wordIndex: 'remove' } }
+      const segs = v.plan.map((p, i) => {
+        const t = byIndex.get(p.segmentIndex);
+        const row = { id: uid(), editVersionId: ver.id, transcriptSegmentId: t.id, action: p.action, reason: p.reason || null, order: i };
+        // "partial" plans carry word indices; feed them into the same wordActions
+        // mechanism that edit:word uses so only those words are cut.
+        if (p.removeWordIndices && p.removeWordIndices.length && t.words && t.words.length) {
+          const wa = {};
+          p.removeWordIndices.forEach((wi) => { if (wi >= 0 && wi < t.words.length) wa[wi] = "remove"; });
+          if (Object.keys(wa).length) {
+            row.wordActions = wa;
+            words[t.id] = wa;
+            row.action = t.words.every((_, wi) => wa[wi] === "remove") ? "remove" : "keep";
+          }
+        }
+        return row;
+      });
+      return { ver, segs, words };
     };
     const A = mk(result.versionA, "Version A - Story"), B = mk(result.versionB, "Version B - Impact");
     const keptA = A.segs.filter((s) => s.action === "keep").length, keptB = B.segs.filter((s) => s.action === "keep").length;
@@ -1603,6 +1815,7 @@ Bus.on("chat:send", async (instruction) => {
       chatMessages: S().chatMessages.concat([assistantMsg]),
       editVersions: S().editVersions.concat([A.ver, B.ver]),
       editSegmentsByVersion: { ...S().editSegmentsByVersion, [A.ver.id]: A.segs, [B.ver.id]: B.segs },
+      wordCutsByVersion: { ...(S().wordCutsByVersion || {}), [A.ver.id]: A.words, [B.ver.id]: B.words },
       activeVersionId: A.ver.id,
       currentProject: { ...proj, activeVersionId: A.ver.id, status: "ready" },
       ui: { ...S().ui, chatBusy: false, compare: true },
@@ -1646,7 +1859,12 @@ Bus.on("export:start", async () => {
     // renderCut enforces its own scaled internal timeouts; the outer cap adds headroom for I/O.
     console.debug("[clippi] export -> versionId:", vid, "ranges:", JSON.parse(JSON.stringify(ranges)));
     Media.pushLog("[clippi] export versionId=" + vid + " ranges=" + JSON.stringify(ranges));
-    const out = await withTimeout(Media.renderCutAuto(asset.blob, ranges, (p) => State.set({ exportState: { ...S().exportState, progress: p } }), (stage) => State.set({ exportState: { ...S().exportState, stage } })), renderTimeoutMs(editedDur, ranges.length) + 120000);
+    const st = S().settings || DEFAULT_SETTINGS;
+    const renderOpts = {
+      resolution: S().ui.renderResolution || '1080p (FHD)',
+      watermark: (st.watermarkEnabled && st.watermarkDataUrl) ? await loadWatermarkImage(st.watermarkDataUrl) : null,
+    };
+    const out = await withTimeout(Media.renderCutAuto(asset.blob, ranges, (p) => State.set({ exportState: { ...S().exportState, progress: p } }), (stage) => State.set({ exportState: { ...S().exportState, stage } }), renderOpts), renderTimeoutMs(editedDur, ranges.length) + 120000);
     const url = URL.createObjectURL(out);
     State.set({ exportState: { status: 'done', progress: 1, url } });
     const a = el('a', { href: url, download: exportFileName(asset) });
@@ -1946,6 +2164,36 @@ function SettingsScreen() {
       btn("Clear", { kind: "danger", icon: "eraser", onclick: () => { llmKey.value = ""; Bus.emit("settings:update", { llmApiKey: "" }); } }),
     ]),
   ]));
+
+  /* ---- Export watermark (burned into exported video only, never the preview) ---- */
+  const wmPreview = el("div", { class: "w-full h-20 rounded-xl border border-neutral-200 bg-neutral-50 flex items-center justify-center overflow-hidden" }, [
+    st.watermarkDataUrl
+      ? el("img", { src: st.watermarkDataUrl, alt: "Watermark preview", class: "max-h-16 max-w-[70%] object-contain" })
+      : el("span", { class: "text-xs text-neutral-400", text: "No watermark image set" }),
+  ]);
+  const wmFile = el("input", { type: "file", accept: "image/png,image/webp,image/svg+xml,image/*", class: "w-full text-xs" });
+  wmFile.addEventListener("change", () => {
+    const f = wmFile.files && wmFile.files[0];
+    if (!f) return;
+    if (f.size > 4 * 1024 * 1024) { toast("Watermark image must be under 4 MB.", "err"); return; }
+    const rd = new FileReader();
+    rd.onload = () => Bus.emit("settings:update", { watermarkDataUrl: String(rd.result), watermarkEnabled: true });
+    rd.onerror = () => toast("Could not read that image.", "err");
+    rd.readAsDataURL(f);
+  });
+  const wmToggle = el("button", {
+    type: "button",
+    class: `w-full rounded-xl border px-3 py-2 text-sm font-medium ${st.watermarkEnabled ? "border-neutral-900 bg-neutral-50" : "border-neutral-200"} ${st.watermarkDataUrl ? "" : "opacity-50 cursor-not-allowed"}`,
+    disabled: !st.watermarkDataUrl,
+    text: st.watermarkEnabled ? "Watermark ON for exports" : "Watermark OFF",
+    onclick: () => Bus.emit("settings:update", { watermarkEnabled: !st.watermarkEnabled }),
+  });
+  wrap.appendChild(section("Export watermark", [
+    wmPreview, wmFile, wmToggle,
+    el("p", { class: "text-xs text-neutral-500", text: "A transparent PNG works best. It is composited into the bottom-right corner of the exported video only — the editor preview never shows it." }),
+    st.watermarkDataUrl ? btn("Remove watermark", { kind: "danger", icon: "eraser", onclick: () => Bus.emit("settings:update", { watermarkDataUrl: null, watermarkEnabled: false }) }) : null,
+  ].filter(Boolean)));
+
   return wrap;
 }
 
@@ -2049,7 +2297,9 @@ function RenderBottomSheet() {
   const frame = el('div', { class: 'relative p-[3px] rounded-2xl transition-all duration-75 overflow-hidden w-fit mx-auto', style: borderStyle }, [thumbMock]);
   let bottomAction = null;
   if (isExp) {
-    const stageTxt = pct < 25 ? 'Chunking audio' : pct < 55 ? 'Scanning speech' : pct < 85 ? 'Encoding video' : 'Packaging MP4';
+    // Export-stage labels (NOT the transcription labels). Prefer the real engine stage.
+    const exportStageLabels = { 'downloading-engine': 'Loading render engine', 'loading-engine': 'Starting render engine', 'writing': 'Reading video', 'encoding': 'Encoding', 'packaging': 'Packaging' };
+    const stageTxt = exportStageLabels[exp.stage] || (pct < 10 ? 'Reading video' : pct < 92 ? 'Encoding' : 'Packaging');
     bottomAction = el('div', { class: 'w-full flex flex-col items-center gap-1.5 pt-1' }, [
       el('div', { class: 'w-full flex justify-between items-center text-xs font-semibold text-neutral-800' }, [el('span', { text: stageTxt }), el('span', { class: 'font-mono font-bold', text: pct + '%' })]),
       el('button', { type: 'button', class: 'text-xs font-semibold text-neutral-400 hover:text-black transition flex items-center gap-1 pt-1', onclick: () => Bus.emit('export:cancel') }, [icon('x', 'w-3 h-3'), el('span', { text: 'Cancel render' })])
