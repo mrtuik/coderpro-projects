@@ -1411,10 +1411,11 @@ function EditorScreen() {
   wrap.appendChild(el('div', { class: 'sticky top-16 z-20 bg-[#f7f7f6] px-4 pb-2' }, [MediaBar()]));
   wrap.appendChild(el('div', { class: 'px-4 flex flex-col gap-4 mt-2' }, [ActivityFeed(), Composer()]));
   if (s.ui.cutsSheetOpenForMessageId) wrap.appendChild(CutsBottomSheet());
+  if (s.ui.renderSheetOpen) wrap.appendChild(RenderBottomSheet());
   if (s.ui.autoExpandTranscript) setTimeout(() => State.set({ ui: { ...S().ui, autoExpandTranscript: false, expandedFeedItems: { ...S().ui.expandedFeedItems, transcript: true } } }), 0);
   return wrap;
 }
-function RenderControl(vidNode, transportRow) {
+function RenderBottomSheet() {
   const s = S(), exp = s.exportState;
   const isExp = exp.status === 'rendering', isDone = exp.status === 'done';
   const pct = isDone ? 100 : Math.min(100, Math.max(0, Math.round((exp.progress || 0) * 100)));
@@ -1425,8 +1426,14 @@ function RenderControl(vidNode, transportRow) {
   const selectorBtn = el('button', { type: 'button', class: 'inline-flex items-center gap-1 text-xs font-semibold text-neutral-800 hover:text-black transition ' + (isExp ? 'opacity-40 pointer-events-none' : ''), onclick: (e) => { e.stopPropagation(); State.set({ ui: { ...S().ui, renderResDropdownOpen: !dropOpen } }); } }, [el('span', { text: curRes }), icon('chevron-down', 'w-3 h-3 text-neutral-400')]);
   const menuItems = options.map((opt) => el('button', { type: 'button', class: 'w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between transition ' + (curRes === opt.id ? 'bg-neutral-900 text-white font-bold' : 'text-neutral-700 hover:bg-neutral-50'), onclick: (e) => { e.stopPropagation(); State.set({ ui: { ...S().ui, renderResolution: opt.id, renderResDropdownOpen: false } }); } }, [el('span', { text: opt.id }), el('span', { class: 'text-[10px] opacity-60 font-mono', text: opt.size })]));
   const dropMenu = dropOpen ? el('div', { class: 'absolute right-0 z-50 mt-1 w-44 rounded-xl bg-white border border-neutral-200 shadow-xl p-1', onclick: (e) => e.stopPropagation() }, menuItems) : null;
-  const topBar = el('div', { class: 'flex items-center justify-between pb-1' }, [el('span', { class: 'text-xs font-bold text-neutral-900', text: 'Render Cut' }), el('div', { class: 'relative inline-block text-left' }, [selectorBtn, dropMenu])]);
-  const frame = el('div', { class: 'relative p-[3px] rounded-2xl transition-all duration-75 overflow-hidden', style: borderStyle }, [vidNode]);
+  const closeBtn = btn('', { icon: 'x', title: 'Close', disabled: isExp, onclick: () => State.set({ ui: { ...S().ui, renderSheetOpen: false } }) });
+  const topBar = el('div', { class: 'flex items-center justify-between pb-1' }, [el('span', { class: 'text-xs font-bold text-neutral-900', text: 'Render Cut' }), el('div', { class: 'flex items-center gap-2' }, [el('div', { class: 'relative inline-block text-left' }, [selectorBtn, dropMenu]), closeBtn])]);
+  const thumbMock = el('div', { class: 'relative w-48 sm:w-52 aspect-video rounded-xl bg-neutral-50 flex flex-col justify-between overflow-hidden p-2' }, [
+    el('div', { class: 'flex items-center justify-between' }, [el('span', { class: 'text-[8px] font-mono font-bold bg-neutral-900 text-white px-1.5 py-0.5 rounded', text: 'HD' }), el('span', { class: 'text-[8px] font-mono font-bold bg-neutral-900 text-white px-1.5 py-0.5 rounded', text: '00:42' })]),
+    el('div', { class: 'flex items-center justify-center py-1' }, [el('div', { class: 'w-7 h-7 rounded-full bg-white shadow-sm border border-neutral-200 flex items-center justify-center' }, [icon('play', 'w-3 h-3 text-neutral-900 ml-0.5 fill-neutral-900')])]),
+    el('div', { class: 'w-full h-1 bg-neutral-200 rounded-full overflow-hidden flex gap-0.5 p-0.2' }, [el('div', { class: 'w-5/12 bg-neutral-900 h-full rounded-xs' }), el('div', { class: 'w-2/12 bg-neutral-400 h-full rounded-xs' }), el('div', { class: 'w-5/12 bg-neutral-900 h-full rounded-xs' })])
+  ]);
+  const frame = el('div', { class: 'relative p-[3px] rounded-2xl transition-all duration-75 overflow-hidden w-fit mx-auto', style: borderStyle }, [thumbMock]);
   let bottomAction = null;
   if (isExp) {
     const stageTxt = pct < 25 ? 'Chunking audio' : pct < 55 ? 'Scanning speech' : pct < 85 ? 'Encoding video' : 'Packaging MP4';
@@ -1444,7 +1451,7 @@ function RenderControl(vidNode, transportRow) {
       el('button', { type: 'button', class: 'w-full h-10 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-white text-xs font-bold flex items-center justify-center gap-2 shadow-xs transition active:scale-[0.99]', onclick: () => Bus.emit('export:start') }, [icon('clapperboard', 'w-3.5 h-3.5'), el('span', { text: 'Render Video' })])
     ]);
   }
-  return el('div', { class: 'flex flex-col gap-2.5 py-1' }, [topBar, frame, transportRow, bottomAction]);
+  return el('div', { class: 'fixed inset-x-0 bottom-0 z-40 rounded-t-3xl border border-neutral-200 bg-white shadow-[0_-4px_24px_rgba(0,0,0,0.15)] max-w-md md:max-w-6xl mx-auto p-5 flex flex-col gap-2.5' }, [topBar, frame, bottomAction]);
 }
 function CutsBottomSheet() {
   const s = S(), msg = s.chatMessages.find(m => m.id === s.ui.cutsSheetOpenForMessageId);
@@ -1640,8 +1647,9 @@ function VideoPanel() {
     time.textContent = fmt(v) + ' / ' + fmt(dispDur);
     vid.currentTime = hasRemovals ? getRawTime(v, ranges) : v;
   });
-  const transportRow = el('div', { class: 'flex items-center gap-3 pt-1' }, [play, scrubberWrap, time]);
-  return RenderControl(vid, transportRow);
+  const renderBtn = btn('Render', { kind: 'primary', icon: 'clapperboard', class: 'rounded-lg px-3 py-1 text-xs font-bold shrink-0', onclick: () => State.set({ ui: { ...S().ui, renderSheetOpen: true } }) });
+  const transportRow = el('div', { class: 'flex items-center gap-3 pt-1' }, [play, scrubberWrap, time, renderBtn]);
+  return el('div', { class: 'space-y-3' }, [vid, transportRow]);
 }
 function ProcessingPanel() {
   const s = S();
@@ -1698,7 +1706,7 @@ function TimelinePanel() {
   return card("Timeline", [], [
     strip,
     el("p", { class: "mt-2 text-xs text-neutral-500", text: "Kept " + fmt(kept) + " of " + fmt(total) + " · dark = keep, light = removed" }),    el('div', { class: 'mt-2 flex flex-wrap gap-2' }, [
-      btn('Export cut', { kind: 'primary', icon: 'clapperboard', disabled: s.exportState.status === 'rendering', onclick: () => Bus.emit('export:start') })
+      btn('Export cut', { kind: 'primary', icon: 'clapperboard', disabled: s.exportState.status === 'rendering', onclick: () => State.set({ ui: { ...S().ui, renderSheetOpen: true } }) })
     ]),
   ]);
 }
